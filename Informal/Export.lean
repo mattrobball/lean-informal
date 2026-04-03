@@ -3,11 +3,15 @@ Copyright (c) 2025 Matthew Ballard. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Matthew Ballard
 -/
-import Informal.Attr
+module
+
+public meta import Informal.Attr
 
 /-!
 # Export and query commands for informal paper references
 -/
+
+public meta section
 
 open Lean Elab Command Informal
 
@@ -59,3 +63,5 @@ elab "#export_informal" path:str : command => do
   let json := Lean.toJson entries
   IO.FS.writeFile path.getString json.pretty
   logInfo m!"Exported {entries.size} informal entries to {path.getString}"
+
+end

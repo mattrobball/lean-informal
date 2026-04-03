@@ -3,7 +3,9 @@ Copyright (c) 2025 Matthew Ballard. All rights reserved.
 Released under Apache 2.0 license as described in the file LICENSE.
 Authors: Matthew Ballard
 -/
-import Lean
+module
+
+public meta import Lean.Elab.Command
 
 /-!
 # Informal paper reference attribute
@@ -36,6 +38,8 @@ theorem heartEquiv_forward ...
 theorem heartEquiv_reverse ...
 ```
 -/
+
+public meta section
 
 open Lean Elab
 
@@ -82,3 +86,5 @@ initialize Lean.registerBuiltinAttribute {
 }
 
 end Informal
+
+end

@@ -1,2 +1,4 @@
-import Informal.Attr
-import Informal.Export
+module
+
+public import Informal.Attr
+public import Informal.Export
