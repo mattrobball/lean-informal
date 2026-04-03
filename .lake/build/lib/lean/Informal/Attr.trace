@@ -1,0 +1,31 @@
+{"synthetic": false,
+ "schemaVersion": "2025-09-10",
+ "outputs":
+ {"o": ["3ebc973acb2f04ff.olean"],
+  "i": "e5e219bdab6297a1.ilean",
+  "c": "463e9d39fac45e4c.c"},
+ "log":
+ [{"message":
+   ".> LEAN_PATH=/home/matt.linux/lean/lean-informal/.lake/build/lib/lean /home/matt.linux/.elan/toolchains/leanprover--lean4---v4.29.0/bin/lean /home/matt.linux/lean/lean-informal/Informal/Attr.lean -o /home/matt.linux/lean/lean-informal/.lake/build/lib/lean/Informal/Attr.olean -i /home/matt.linux/lean/lean-informal/.lake/build/lib/lean/Informal/Attr.ilean -c /home/matt.linux/lean/lean-informal/.lake/build/ir/Informal/Attr.c --setup /home/matt.linux/lean/lean-informal/.lake/build/ir/Informal/Attr.setup.json --json",
+   "level": "trace"}],
+ "inputs":
+ [["Informal.Attr:deps",
+   [["deps",
+     [["informal/Informal:extraDep",
+       [["@informal:extraDep", "00000000000006bb"]]],
+      ["imports", "00000000000006bb"]]],
+    ["libs",
+     [["import dynlibs", "00000000000006bb"],
+      ["package external libraries", "00000000000006bb"],
+      ["module dynlibs", "00000000000006bb"],
+      ["module plugins", "00000000000006bb"]]]]],
+  ["Lean 4.29.0, commit 98dc76e3c0a9b856c9b98726b713fb04fab16740",
+   "60bb08ef22408c8a"],
+  ["/home/matt.linux/lean/lean-informal/Informal/Attr.lean",
+   "a30ade7d1098e9f8"],
+  ["options", "00000000000006bb"],
+  ["isModule: false", "feefd2a0d3a1847e"],
+  ["Module.name: Informal.Attr", "c965c366a74c4c45"],
+  ["Package.id?: (some informal)", "6ee69c14d48e8db7"],
+  ["Module.leanArgs: #[]", "00000000000006bb"]],
+ "depHash": "35aa1ff27c964209"}

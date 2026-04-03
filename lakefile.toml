@@ -1,0 +1,7 @@
+name = "informal"
+version = "0.1.0"
+keywords = ["documentation", "formalization"]
+description = "Attribute for pairing formal Lean declarations with paper references"
+
+[[lean_lib]]
+name = "Informal"

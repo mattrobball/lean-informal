@@ -1,0 +1,33 @@
+{"synthetic": false,
+ "schemaVersion": "2025-09-10",
+ "outputs":
+ {"o": ["b51168704537e2d3.olean"],
+  "i": "294812c83e5f135e.ilean",
+  "c": "ebba7ffab2009085.c"},
+ "log":
+ [{"message":
+   ".> LEAN_PATH=/home/matt.linux/lean/lean-informal/.lake/build/lib/lean /home/matt.linux/.elan/toolchains/leanprover--lean4---v4.29.0/bin/lean /home/matt.linux/lean/lean-informal/Informal/Export.lean -o /home/matt.linux/lean/lean-informal/.lake/build/lib/lean/Informal/Export.olean -i /home/matt.linux/lean/lean-informal/.lake/build/lib/lean/Informal/Export.ilean -c /home/matt.linux/lean/lean-informal/.lake/build/ir/Informal/Export.c --setup /home/matt.linux/lean/lean-informal/.lake/build/ir/Informal/Export.setup.json --json",
+   "level": "trace"}],
+ "inputs":
+ [["Informal.Export:deps",
+   [["deps",
+     [["informal/Informal:extraDep",
+       [["@informal:extraDep", "00000000000006bb"]]],
+      ["imports",
+       [["Informal.Attr transitive imports (legacy)", "00000000000006bb"],
+        ["Informal.Attr:importAllArts", "b59bd1af5e9ce7a9"]]]]],
+    ["libs",
+     [["import dynlibs", "00000000000006bb"],
+      ["package external libraries", "00000000000006bb"],
+      ["module dynlibs", "00000000000006bb"],
+      ["module plugins", "00000000000006bb"]]]]],
+  ["Lean 4.29.0, commit 98dc76e3c0a9b856c9b98726b713fb04fab16740",
+   "60bb08ef22408c8a"],
+  ["/home/matt.linux/lean/lean-informal/Informal/Export.lean",
+   "e9772f8e82f6da9a"],
+  ["options", "00000000000006bb"],
+  ["isModule: false", "feefd2a0d3a1847e"],
+  ["Module.name: Informal.Export", "29f9af22152f08f9"],
+  ["Package.id?: (some informal)", "6ee69c14d48e8db7"],
+  ["Module.leanArgs: #[]", "00000000000006bb"]],
+ "depHash": "88cd4730916ce1f6"}

@@ -1,0 +1,11 @@
+{"plugins": [],
+ "package": "informal",
+ "options": {},
+ "name": "Informal",
+ "isModule": false,
+ "importArts":
+ {"Informal.Export":
+  ["/home/matt.linux/lean/lean-informal/.lake/build/lib/lean/Informal/Export.olean"],
+  "Informal.Attr":
+  ["/home/matt.linux/lean/lean-informal/.lake/build/lib/lean/Informal/Attr.olean"]},
+ "dynlibs": []}
