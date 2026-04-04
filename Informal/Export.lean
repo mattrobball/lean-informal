@@ -8,12 +8,12 @@ module
 public meta import Informal.Attr
 
 /-!
-# Export and query commands for informal paper references
+# Export, query, and check commands for informal paper references
 -/
 
 public meta section
 
-open Lean Elab Command Informal
+open Lean Elab Command Meta Informal
 
 /-- JSON-serializable informal entry with module name resolved. -/
 structure InformalExportEntry where
@@ -21,6 +21,8 @@ structure InformalExportEntry where
   moduleName : String
   paperRef : String
   comment : String
+  contentHash : Nat
+  depHashes : Array (String × Nat)
   deriving ToJson, FromJson
 
 /-- Export all informal entries, resolving module names from the environment. -/
@@ -32,7 +34,9 @@ def exportInformalEntries (env : Environment) : Array InformalExportEntry :=
     { declName := e.declName.toString
       moduleName
       paperRef := e.paperRef
-      comment := e.comment }
+      comment := e.comment
+      contentHash := e.contentHash.toNat
+      depHashes := e.depHashes.map fun (n, h) => (n.toString, h.toNat) }
 
 /-- `#informal_refs` — list all declarations tagged with `@[informal]`. -/
 elab "#informal_refs" : command => do
@@ -63,5 +67,47 @@ elab "#export_informal" path:str : command => do
   let json := Lean.toJson entries
   IO.FS.writeFile path.getString json.pretty
   logInfo m!"Exported {entries.size} informal entries to {path.getString}"
+
+/-- `#check_informal` — verify that all `@[informal]` entries are still consistent
+with the current state of their declarations and dependencies.
+
+Reports warnings for:
+- Declarations whose content hash has changed
+- Dependencies whose content hash has changed
+- Declarations or dependencies that no longer exist -/
+elab "#check_informal" : command => do
+  let env ← getEnv
+  let entries := getEntries env
+  if entries.isEmpty then
+    logInfo "No informal entries to check."
+    return
+  let mut issues := 0
+  for entry in entries do
+    let some ci := env.find? entry.declName | do
+      logWarning m!"@[informal \"{entry.paperRef}\"] on {.ofConstName entry.declName}: \
+        declaration no longer exists"
+      issues := issues + 1
+      continue
+    let currentHash := computeHash env entry.declName ci
+    if currentHash != entry.contentHash then
+      logWarning m!"@[informal \"{entry.paperRef}\"] on {.ofConstName entry.declName}: \
+        declaration changed (hash {entry.contentHash.toNat} → {currentHash.toNat})"
+      issues := issues + 1
+    for (depName, storedHash) in entry.depHashes do
+      let some depCi := env.find? depName | do
+        logWarning m!"@[informal \"{entry.paperRef}\"] on {.ofConstName entry.declName}: \
+          dependency {.ofConstName depName} no longer exists"
+        issues := issues + 1
+        continue
+      let currentDepHash := computeHash env depName depCi
+      if currentDepHash != storedHash then
+        logWarning m!"@[informal \"{entry.paperRef}\"] on {.ofConstName entry.declName}: \
+          dependency {.ofConstName depName} changed \
+          (hash {storedHash.toNat} → {currentDepHash.toNat})"
+        issues := issues + 1
+  if issues == 0 then
+    logInfo m!"All {entries.size} informal entries are consistent."
+  else
+    logWarning m!"{issues} issue(s) found across {entries.size} informal entries."
 
 end

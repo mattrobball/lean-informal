@@ -15,6 +15,10 @@ to a statement in a mathematical paper or text. It stores the reference in a
 persistent environment extension, making it available for documentation
 generation, drift detection, and cross-referencing tooling.
 
+At application time, the attribute records a snapshot of the declaration's
+content hash and the hashes of its dependencies, enabling `#check_informal`
+to detect when a tagged declaration or its dependencies have changed.
+
 ## Usage
 
 ```
@@ -45,7 +49,9 @@ open Lean Elab
 
 namespace Informal
 
-/-- An informal paper reference entry stored in the environment. -/
+/-- An informal paper reference entry stored in the environment.
+Includes a snapshot of the declaration's content hash and dependency hashes
+at the time the tag was applied, for drift detection. -/
 structure Entry where
   /-- The Lean declaration name. -/
   declName : Name
@@ -53,6 +59,13 @@ structure Entry where
   paperRef : String
   /-- Optional comment or gloss. -/
   comment : String := ""
+  /-- Hash of the declaration's type (and body for data-carrying declarations)
+      at the time the tag was applied. -/
+  contentHash : UInt64 := 0
+  /-- Hashes of the declaration's dependencies at the time the tag was applied.
+      Each pair is `(depName, depHash)`. Only project-local dependencies are
+      tracked (Mathlib/Lean builtins are skipped). -/
+  depHashes : Array (Name × UInt64) := #[]
   deriving BEq, Hashable, Inhabited
 
 /-- Persistent environment extension storing all informal entries. -/
@@ -70,19 +83,97 @@ def getEntries (env : Environment) : Array Entry :=
 def getEntriesFor (env : Environment) (paperRef : String) : Array Entry :=
   (getEntries env).filter (·.paperRef == paperRef)
 
+/-- Is this declaration proof-irrelevant (only type matters for hash)? -/
+private def isProofIrrelevant (ci : ConstantInfo) : Bool :=
+  match ci with
+  | .thmInfo _ => true
+  | _ => false
+
+/-- Compute a content hash for a declaration using `Expr.hash` (context-independent).
+For proof-irrelevant declarations (theorems), hashes only the type.
+For data-carrying declarations (defs, structures, etc.), hashes type + body/fields. -/
+def computeHash (env : Environment) (name : Name) (ci : ConstantInfo) : UInt64 := Id.run do
+  if isProofIrrelevant ci then
+    return ci.type.hash
+  let mut h := ci.type.hash
+  match ci with
+  | .defnInfo di => h := mixHash h di.value.hash
+  | .opaqueInfo oi => h := mixHash h oi.value.hash
+  | _ => ()
+  if let some sinfo := getStructureInfo? env name then
+    for field in sinfo.fieldNames do
+      if let some projInfo := env.find? (name ++ field) then
+        h := mixHash h projInfo.type.hash
+  if let .inductInfo ii := ci then
+    for ctorName in ii.ctors do
+      if let some ctorInfo := env.find? ctorName then
+        h := mixHash h ctorInfo.type.hash
+  return h
+
+/-- Collect the direct dependencies of a declaration and compute their hashes.
+Only includes project-local constants (skips Mathlib/Lean builtins). -/
+def computeDepHashes (env : Environment) (name : Name) (ci : ConstantInfo)
+    : Array (Name × UInt64) := Id.run do
+  -- Collect constants from type
+  let mut depSet : NameSet := {}
+  for c in ci.type.getUsedConstants do
+    if c != name then depSet := depSet.insert c
+  -- For data-carrying declarations, also collect from value/constructors
+  if !isProofIrrelevant ci then
+    match ci with
+    | .defnInfo di =>
+      for c in di.value.getUsedConstants do
+        if c != name then depSet := depSet.insert c
+    | .opaqueInfo oi =>
+      for c in oi.value.getUsedConstants do
+        if c != name then depSet := depSet.insert c
+    | .inductInfo ii =>
+      for ctorName in ii.ctors do
+        if let some ctorCi := env.find? ctorName then
+          for c in ctorCi.type.getUsedConstants do
+            if c != name then depSet := depSet.insert c
+    | _ => ()
+  -- Determine project root for filtering.
+  -- At attribute application time, the current module may not be in header.moduleNames.
+  -- Fall back to the module name from the Lean environment's main module.
+  let declRoot := match env.getModuleIdxFor? name with
+    | some idx => env.header.moduleNames[idx.toNat]!.getRoot
+    | none => env.mainModule.getRoot
+  -- Filter to project-local constants, compute hashes
+  let mut result : Array (Name × UInt64) := #[]
+  for dep in depSet.toArray.qsort Name.lt do
+    let some modIdx := env.getModuleIdxFor? dep | continue
+    let modName := env.header.moduleNames[modIdx.toNat]!
+    unless declRoot == modName.getRoot do continue
+    let some depCi := env.find? dep | continue
+    let h := computeHash env dep depCi
+    result := result.push (dep, h)
+  return result
+
 /-- The `@[informal]` attribute syntax. -/
 syntax (name := informal) "informal" str (ppSpace str)? : attr
 
 initialize Lean.registerBuiltinAttribute {
   name := `informal
-  descr := "Tag a declaration with a paper reference."
+  descr := "Tag a declaration with a paper reference and record a content snapshot."
   add := fun decl stx _attrKind => do
     let (paperRef, comment) ← match stx with
       | `(attr| informal $ref $[$cmt]?) =>
         pure (ref.getString, (cmt.map (·.getString)).getD "")
       | _ => throwUnsupportedSyntax
-    modifyEnv (informalExt.addEntry · { declName := decl, paperRef, comment })
-  applicationTime := .afterTypeChecking
+    let env ← getEnv
+    let some ci := env.find? decl
+      | throwError "declaration '{decl}' not found in environment"
+    let contentHash := computeHash env decl ci
+    let depHashes := computeDepHashes env decl ci
+    modifyEnv (informalExt.addEntry · {
+      declName := decl
+      paperRef
+      comment
+      contentHash
+      depHashes
+    })
+  applicationTime := .afterCompilation
 }
 
 end Informal
