@@ -136,45 +136,73 @@ def isUserDecl (env : Environment) (dep : Name) : Bool :=
     | some (.ctorInfo _) | some (.recInfo _) | some (.quotInfo _) => false
     | _ => true
 
-/-- Collect the direct dependencies of a declaration and compute their hashes.
-Only includes project-local, user-written constants (skips Mathlib/Lean builtins,
-projections, recursors, constructors, and other auto-generated declarations). -/
-def computeDepHashes (env : Environment) (name : Name) (ci : ConstantInfo)
-    : Array (Name × UInt64) := Id.run do
-  -- Collect constants from type
-  let mut depSet : NameSet := {}
-  for c in ci.type.getUsedConstants do
-    if c != name then depSet := depSet.insert c
-  -- For data-carrying declarations, also collect from value/constructors
+/-- State for the recursive dependency collector. -/
+private structure CollectState where
+  visited : NameSet := {}
+  deps : NameSet := {}
+
+/-- Monad for dependency collection: reads `(Environment, projectRoot)`. -/
+private abbrev CollectM := ReaderT (Environment × Name) (StateM CollectState)
+
+/-- Collect constants from an expression, recursing into each. -/
+private def collectExpr (e : Expr) (collect : Name → CollectM Unit) : CollectM Unit :=
+  e.getUsedConstants.forM collect
+
+/-- Recursively collect the transitive closure of data-carrying dependencies.
+Follows type deps for all declarations; follows value/constructor deps for
+data-carrying declarations only (skips theorem proofs).
+Only reports project-local, user-written declarations.
+Adapted from lean-exposition's `LeanExposition/TrustedBase.lean:collect`. -/
+private partial def collectDep (c : Name) : CollectM Unit := do
+  let s ← get
+  if s.visited.contains c then return
+  modify fun s => { s with visited := s.visited.insert c }
+  let (env, projectRoot) ← read
+  let some ci := env.find? c | return
+  -- Report if it's a project-local user declaration
+  if isUserDecl env c then
+    match env.getModuleIdxFor? c with
+    | some idx =>
+      if env.header.moduleNames[idx.toNat]!.getRoot == projectRoot then
+        modify fun s => { s with deps := s.deps.insert c }
+    | none => pure ()
+  -- Recurse into type (always)
+  collectExpr ci.type collectDep
+  -- Recurse into value/constructors (data-carrying only)
   if !isProofIrrelevant ci then
     match ci with
-    | .defnInfo di =>
-      for c in di.value.getUsedConstants do
-        if c != name then depSet := depSet.insert c
-    | .opaqueInfo oi =>
-      for c in oi.value.getUsedConstants do
-        if c != name then depSet := depSet.insert c
-    | .inductInfo ii =>
-      for ctorName in ii.ctors do
-        if let some ctorCi := env.find? ctorName then
-          for c in ctorCi.type.getUsedConstants do
-            if c != name then depSet := depSet.insert c
-    | _ => ()
-  -- Determine project root for filtering.
-  -- At attribute application time, the current module may not be in header.moduleNames.
-  let declRoot := match env.getModuleIdxFor? name with
+    | .defnInfo v => collectExpr v.value collectDep
+    | .opaqueInfo v => collectExpr v.value collectDep
+    | .inductInfo v => v.ctors.forM collectDep
+    | .ctorInfo _ => collectExpr ci.type collectDep
+    | _ => pure ()
+
+/-- Compute the transitive closure of data-carrying dependencies for a declaration
+and return their hashes. Only includes project-local, user-written declarations.
+Skips theorem proofs but follows their types. -/
+def computeDepHashes (env : Environment) (name : Name) (ci : ConstantInfo)
+    : Array (Name × UInt64) := Id.run do
+  let projectRoot := match env.getModuleIdxFor? name with
     | some idx => env.header.moduleNames[idx.toNat]!.getRoot
     | none => env.mainModule.getRoot
-  -- Filter to project-local, user-written constants
+  -- Run transitive collection starting from the declaration's type + body
+  let mut s : CollectState := {}
+  s := { s with visited := s.visited.insert name }
+  (_, s) := ((collectExpr ci.type collectDep).run (env, projectRoot)).run s
+  if !isProofIrrelevant ci then
+    match ci with
+    | .defnInfo v =>
+      (_, s) := ((collectExpr v.value collectDep).run (env, projectRoot)).run s
+    | .opaqueInfo v =>
+      (_, s) := ((collectExpr v.value collectDep).run (env, projectRoot)).run s
+    | .inductInfo v =>
+      (_, s) := ((v.ctors.forM collectDep).run (env, projectRoot)).run s
+    | _ => ()
+  -- Hash all collected deps
   let mut result : Array (Name × UInt64) := #[]
-  for dep in depSet.toArray.qsort Name.lt do
-    unless isUserDecl env dep do continue
-    let some modIdx := env.getModuleIdxFor? dep | continue
-    let modName := env.header.moduleNames[modIdx.toNat]!
-    unless declRoot == modName.getRoot do continue
+  for dep in s.deps.toArray.qsort Name.lt do
     let some depCi := env.find? dep | continue
-    let h := computeHash env dep depCi
-    result := result.push (dep, h)
+    result := result.push (dep, computeHash env dep depCi)
   return result
 
 /-- The `@[informal]` attribute syntax. -/
