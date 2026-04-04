@@ -84,7 +84,7 @@ def getEntriesFor (env : Environment) (paperRef : String) : Array Entry :=
   (getEntries env).filter (·.paperRef == paperRef)
 
 /-- Is this declaration proof-irrelevant (only type matters for hash)? -/
-private def isProofIrrelevant (ci : ConstantInfo) : Bool :=
+def isProofIrrelevant (ci : ConstantInfo) : Bool :=
   match ci with
   | .thmInfo _ => true
   | _ => false
@@ -111,11 +111,11 @@ def computeHash (env : Environment) (name : Name) (ci : ConstantInfo) : UInt64 :
   return h
 
 /-- Is this a name component that indicates auto-generated code? -/
-private def isAuxComponent (s : String) : Bool :=
+def isAuxComponent (s : String) : Bool :=
   s.startsWith "_" || s.startsWith "match_" || s.startsWith "proof_"
 
 /-- Is this name auto-generated (internal, projection, recursor, etc.)? -/
-private partial def isAutoGenName : Name → Bool
+partial def isAutoGenName : Name → Bool
   | .anonymous => false
   | .num p _ => isAutoGenName p
   | .str p s =>
@@ -128,7 +128,7 @@ private partial def isAutoGenName : Name → Bool
 
 /-- Should this constant be tracked as a dependency? Filters out auto-generated
 declarations, projections, constructors, recursors, etc. -/
-private def isUserDecl (env : Environment) (dep : Name) : Bool :=
+def isUserDecl (env : Environment) (dep : Name) : Bool :=
   if isAutoGenName dep || dep.isInternal || dep.isImplementationDetail then false
   else if env.getProjectionFnInfo? dep |>.isSome then false
   else if isAuxRecursor env dep || isNoConfusion env dep then false
