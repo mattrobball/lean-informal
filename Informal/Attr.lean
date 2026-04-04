@@ -110,8 +110,35 @@ def computeHash (env : Environment) (name : Name) (ci : ConstantInfo) : UInt64 :
         h := mixHash h ctorInfo.type.hash
   return h
 
+/-- Is this a name component that indicates auto-generated code? -/
+private def isAuxComponent (s : String) : Bool :=
+  s.startsWith "_" || s.startsWith "match_" || s.startsWith "proof_"
+
+/-- Is this name auto-generated (internal, projection, recursor, etc.)? -/
+private partial def isAutoGenName : Name → Bool
+  | .anonymous => false
+  | .num p _ => isAutoGenName p
+  | .str p s =>
+      isAuxComponent s
+      || s ∈ ["brecOn", "below", "casesOn", "noConfusion", "noConfusionType",
+              "recOn", "rec", "ind", "mk", "sizeOf_spec", "inject", "injEq",
+              "ctorIdx", "ext_iff", "congr_simp"]
+      || (s.startsWith "eq_" && (s.drop 3).toString.all Char.isDigit)
+      || isAutoGenName p
+
+/-- Should this constant be tracked as a dependency? Filters out auto-generated
+declarations, projections, constructors, recursors, etc. -/
+private def isUserDecl (env : Environment) (dep : Name) : Bool :=
+  if isAutoGenName dep || dep.isInternal || dep.isImplementationDetail then false
+  else if env.getProjectionFnInfo? dep |>.isSome then false
+  else if isAuxRecursor env dep || isNoConfusion env dep then false
+  else match env.find? dep with
+    | some (.ctorInfo _) | some (.recInfo _) | some (.quotInfo _) => false
+    | _ => true
+
 /-- Collect the direct dependencies of a declaration and compute their hashes.
-Only includes project-local constants (skips Mathlib/Lean builtins). -/
+Only includes project-local, user-written constants (skips Mathlib/Lean builtins,
+projections, recursors, constructors, and other auto-generated declarations). -/
 def computeDepHashes (env : Environment) (name : Name) (ci : ConstantInfo)
     : Array (Name × UInt64) := Id.run do
   -- Collect constants from type
@@ -135,13 +162,13 @@ def computeDepHashes (env : Environment) (name : Name) (ci : ConstantInfo)
     | _ => ()
   -- Determine project root for filtering.
   -- At attribute application time, the current module may not be in header.moduleNames.
-  -- Fall back to the module name from the Lean environment's main module.
   let declRoot := match env.getModuleIdxFor? name with
     | some idx => env.header.moduleNames[idx.toNat]!.getRoot
     | none => env.mainModule.getRoot
-  -- Filter to project-local constants, compute hashes
+  -- Filter to project-local, user-written constants
   let mut result : Array (Name × UInt64) := #[]
   for dep in depSet.toArray.qsort Name.lt do
+    unless isUserDecl env dep do continue
     let some modIdx := env.getModuleIdxFor? dep | continue
     let modName := env.header.moduleNames[modIdx.toNat]!
     unless declRoot == modName.getRoot do continue
