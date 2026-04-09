@@ -8,11 +8,11 @@ import Informal
 /-!
 # Test suite for dependency tracking
 
-Tests the refactored `Informal.Attr` logic:
+Tests the `Informal` declaration classification and dependency logic:
 - `usedConstants`: proof-irrelevant one-level constant extraction
-- `isUserDecl`: structural filtering (no name-pattern heuristics)
+- `classifyNonUser`: structural filtering (no name-pattern heuristics)
 - `resolveToUser`: derivative → parent resolution
-- `collectDep` / `computeDepHashes`: transitive dependency walk
+- `collectDeps` / `computeDepHashes`: transitive dependency walk
 
 Each test uses `#eval` with a guard that throws on failure.
 -/
@@ -97,43 +97,43 @@ def sneaky (n : Nat) : String :=
   IO.println "PASS: usedConstants"
 
 -- ============================================================
--- Test 2: isUserDecl structural filtering
+-- Test 2: classifyNonUser structural filtering
 -- ============================================================
 
 #eval show MetaM Unit from do
   let env ← getEnv
 
-  -- User-facing declarations should pass
+  -- User-facing declarations should pass (classifyNonUser returns none)
   for n in #[`Color, `Tree, `Point, `HasSize, `matchFunc, `trivialThm, `opaqueFunc] do
-    unless isUserDecl env n do
-      throwError s!"isUserDecl should accept {n}"
+    if (classifyNonUser env n).isSome then
+      throwError s!"classifyNonUser should return none for {n}"
 
-  -- Constructors should be rejected
+  -- Constructors should be classified as non-user
   for n in #[`Color.red, `Color.green, `Tree.leaf, `Tree.node, `Point.mk] do
-    if isUserDecl env n then
-      throwError s!"isUserDecl should reject constructor {n}"
+    unless (classifyNonUser env n).isSome do
+      throwError s!"classifyNonUser should classify constructor {n}"
 
-  -- Recursors should be rejected
+  -- Recursors should be classified as non-user
   for n in #[`Color.rec, `Tree.rec, `Point.rec] do
-    if isUserDecl env n then
-      throwError s!"isUserDecl should reject recursor {n}"
+    unless (classifyNonUser env n).isSome do
+      throwError s!"classifyNonUser should classify recursor {n}"
 
-  -- Aux recursors should be rejected
+  -- Aux recursors should be classified as non-user
   for n in #[`Color.casesOn, `Color.recOn, `Tree.casesOn, `Tree.brecOn, `Tree.below] do
-    if isUserDecl env n then
-      throwError s!"isUserDecl should reject aux recursor {n}"
+    unless (classifyNonUser env n).isSome do
+      throwError s!"classifyNonUser should classify aux recursor {n}"
 
-  -- noConfusion should be rejected
+  -- noConfusion should be classified as non-user
   for n in #[`Color.noConfusion, `Tree.noConfusion] do
-    if isUserDecl env n then
-      throwError s!"isUserDecl should reject noConfusion {n}"
+    unless (classifyNonUser env n).isSome do
+      throwError s!"classifyNonUser should classify noConfusion {n}"
 
-  -- Projections should be rejected
+  -- Projections should be classified as non-user
   for n in #[`Point.x, `Point.y, `HasSize.size] do
-    if isUserDecl env n then
-      throwError s!"isUserDecl should reject projection {n}"
+    unless (classifyNonUser env n).isSome do
+      throwError s!"classifyNonUser should classify projection {n}"
 
-  IO.println "PASS: isUserDecl"
+  IO.println "PASS: classifyNonUser"
 
 -- ============================================================
 -- Test 3: resolveToUser maps derivatives to parents
@@ -341,8 +341,8 @@ def sneaky (n : Nat) : String :=
   for (d, p) in #[(`Color.noConfusionType, `Color), (`Color.ctorIdx, `Color),
                    (`Tree.noConfusionType, `Tree), (`Tree.ctorIdx, `Tree)] do
     unless (env.find? d).isSome do continue  -- skip if not generated
-    -- isUserDecl should reject them (they fail isInternal or structural checks)
-    -- OR resolveToUser should map them to parent
+    -- classifyNonUser should classify them as non-user
+    -- AND resolveToUser should map them to parent
     let resolved := resolveToUser env d
     unless resolved == p do
       throwError s!"{d} should resolve to {p}, got {resolved}"

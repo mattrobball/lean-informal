@@ -6,6 +6,7 @@ Authors: Matthew Ballard
 module
 
 public meta import Lean.Elab.Command
+public meta import Informal.Classify
 public meta import Informal.Deps
 
 /-!
@@ -107,34 +108,6 @@ def computeHash (env : Environment) (name : Name) (ci : ConstantInfo) : UInt64 :
       if let some ctorInfo := env.find? ctorName then
         h := mixHash h ctorInfo.type.hash
   return h
-
-/-- Should this constant be recorded as a user-facing dependency?
-Uses only structural checks from the core API — no name-pattern heuristics.
-Data-carrying derivatives that fail this check are still traversed;
-they are resolved to their parent via `resolveToUser` at recording time. -/
-def isUserDecl (env : Environment) (dep : Name) : Bool :=
-  if dep.isInternal || dep.isImplementationDetail then false
-  else if (env.getProjectionFnInfo? dep).isSome then false
-  else if isAuxRecursor env dep || isNoConfusion env dep then false
-  else match env.find? dep with
-    | some (.ctorInfo _) | some (.recInfo _) | some (.quotInfo _) => false
-    | _ => true
-
-/-- Resolve a derivative name to its user-facing parent.
-Strips `_private` wrappers via `privateToUserName?`, then checks whether
-`Name.getPrefix` yields a valid user-facing declaration. This catches
-derivatives like `Foo.match_1`, `Foo.ctorIdx`, `Foo.noConfusionType` that
-pass structural checks but aren't user-written. -/
-def resolveToUser (env : Environment) (name : Name) : Name :=
-  let n := (privateToUserName? name).getD name
-  -- If getPrefix is a valid user-facing declaration, prefer it.
-  -- This resolves both structurally-caught derivatives (ctors, recs, etc.)
-  -- and name-pattern derivatives (match_, ctorIdx, noConfusionType, etc.).
-  let p := n.getPrefix
-  if !p.isAnonymous && (env.find? p).isSome && isUserDecl env p then p
-  else if isUserDecl env n then n
-  else if !p.isAnonymous && (env.find? p).isSome then p
-  else n
 
 /-- Compute the transitive closure of data-carrying dependencies for a declaration
 and return their hashes. Uses `collectDeps` for the raw transitive closure,

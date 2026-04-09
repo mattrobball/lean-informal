@@ -6,6 +6,7 @@ Authors: Matthew Ballard
 module
 
 public meta import Informal.Attr
+public meta import Informal.Classify
 public meta import Lean.DocString
 
 /-!
@@ -125,10 +126,7 @@ def collectDecls (rootPrefix : Name) : CoreM (Array DeclEntry) := do
     for j in [:modData.constNames.size] do
       let name := modData.constNames[j]!
       let some ci := env.find? name | continue
-      unless isUserDecl env name do continue
-      match ci with
-      | .ctorInfo _ | .recInfo _ | .quotInfo _ => continue
-      | _ => pure ()
+      if (classifyNonUser env name).isSome then continue
       let kind ← classifyDecl env name ci
       let hash := computeHash env name ci
       let doc ← (Lean.findDocString? env name : IO _)
