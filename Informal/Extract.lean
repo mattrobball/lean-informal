@@ -127,6 +127,10 @@ def collectDecls (rootPrefix : Name) : CoreM (Array DeclEntry) := do
       let name := modData.constNames[j]!
       let some ci := env.find? name | continue
       if (classifyNonUser env name).isSome then continue
+      -- Additional filter: no declaration ranges means compiler-generated.
+      -- This runs in CoreM where findDeclarationRanges? is reliable
+      -- (unlike during afterCompilation where declRangeExt may not be populated).
+      unless (← findDeclarationRanges? name).isSome do continue
       let kind ← classifyDecl env name ci
       let hash := computeHash env name ci
       let doc ← (Lean.findDocString? env name : IO _)
