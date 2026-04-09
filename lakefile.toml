@@ -5,3 +5,7 @@ description = "Attribute for pairing formal Lean declarations with paper referen
 
 [[lean_lib]]
 name = "Informal"
+
+[[lean_lib]]
+name = "Test"
+globs = ["Test.+"]

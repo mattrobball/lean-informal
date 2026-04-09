@@ -6,6 +6,7 @@ Authors: Matthew Ballard
 module
 
 public meta import Lean.Elab.Command
+public meta import Informal.Deps
 
 /-!
 # Informal paper reference attribute
@@ -83,23 +84,20 @@ def getEntries (env : Environment) : Array Entry :=
 def getEntriesFor (env : Environment) (paperRef : String) : Array Entry :=
   (getEntries env).filter (·.paperRef == paperRef)
 
-/-- Is this declaration proof-irrelevant (only type matters for hash)? -/
-def isProofIrrelevant (ci : ConstantInfo) : Bool :=
-  match ci with
-  | .thmInfo _ => true
-  | _ => false
-
-/-- Compute a content hash for a declaration using `Expr.hash` (context-independent).
-For proof-irrelevant declarations (theorems), hashes only the type.
-For data-carrying declarations (defs, structures, etc.), hashes type + body/fields. -/
+/-- Compute a content hash for a declaration.
+For theorems, hashes only the type (proof-irrelevant).
+For data-carrying declarations, hashes type + value/fields/constructors. -/
 def computeHash (env : Environment) (name : Name) (ci : ConstantInfo) : UInt64 := Id.run do
-  if isProofIrrelevant ci then
-    return ci.type.hash
   let mut h := ci.type.hash
   match ci with
-  | .defnInfo di => h := mixHash h di.value.hash
+  | .thmInfo _    => ()
+  | .defnInfo di  => h := mixHash h di.value.hash
   | .opaqueInfo oi => h := mixHash h oi.value.hash
-  | _ => ()
+  | .axiomInfo _  => ()
+  | .ctorInfo _   => ()
+  | .recInfo _    => ()
+  | .quotInfo _   => ()
+  | .inductInfo _ => ()
   if let some sinfo := getStructureInfo? env name then
     for field in sinfo.fieldNames do
       if let some projInfo := env.find? (name ++ field) then
@@ -110,97 +108,48 @@ def computeHash (env : Environment) (name : Name) (ci : ConstantInfo) : UInt64 :
         h := mixHash h ctorInfo.type.hash
   return h
 
-/-- Is this a name component that indicates auto-generated code? -/
-def isAuxComponent (s : String) : Bool :=
-  s.startsWith "_" || s.startsWith "match_" || s.startsWith "proof_"
-
-/-- Is this name auto-generated (internal, projection, recursor, etc.)? -/
-partial def isAutoGenName : Name → Bool
-  | .anonymous => false
-  | .num p _ => isAutoGenName p
-  | .str p s =>
-      isAuxComponent s
-      || s ∈ ["brecOn", "below", "casesOn", "noConfusion", "noConfusionType",
-              "recOn", "rec", "ind", "mk", "sizeOf_spec", "inject", "injEq",
-              "ctorIdx", "ext_iff", "congr_simp"]
-      || (s.startsWith "eq_" && (s.drop 3).toString.all Char.isDigit)
-      || isAutoGenName p
-
-/-- Should this constant be tracked as a dependency? Filters out auto-generated
-declarations, projections, constructors, recursors, etc. -/
+/-- Should this constant be recorded as a user-facing dependency?
+Uses only structural checks from the core API — no name-pattern heuristics.
+Data-carrying derivatives that fail this check are still traversed;
+they are resolved to their parent via `resolveToUser` at recording time. -/
 def isUserDecl (env : Environment) (dep : Name) : Bool :=
-  if isAutoGenName dep || dep.isInternal || dep.isImplementationDetail then false
-  else if env.getProjectionFnInfo? dep |>.isSome then false
+  if dep.isInternal || dep.isImplementationDetail then false
+  else if (env.getProjectionFnInfo? dep).isSome then false
   else if isAuxRecursor env dep || isNoConfusion env dep then false
   else match env.find? dep with
     | some (.ctorInfo _) | some (.recInfo _) | some (.quotInfo _) => false
     | _ => true
 
-/-- State for the recursive dependency collector. -/
-private structure CollectState where
-  visited : NameSet := {}
-  deps : NameSet := {}
-
-/-- Monad for dependency collection: reads `(Environment, projectRoot)`. -/
-private abbrev CollectM := ReaderT (Environment × Name) (StateM CollectState)
-
-/-- Collect constants from an expression, recursing into each. -/
-private def collectExpr (e : Expr) (collect : Name → CollectM Unit) : CollectM Unit :=
-  e.getUsedConstants.forM collect
-
-/-- Recursively collect the transitive closure of data-carrying dependencies.
-Follows type deps for all declarations; follows value/constructor deps for
-data-carrying declarations only (skips theorem proofs).
-Only reports project-local, user-written declarations.
-Adapted from lean-exposition's `LeanExposition/TrustedBase.lean:collect`. -/
-private partial def collectDep (c : Name) : CollectM Unit := do
-  let s ← get
-  if s.visited.contains c then return
-  modify fun s => { s with visited := s.visited.insert c }
-  let (env, projectRoot) ← read
-  let some ci := env.find? c | return
-  -- Report if it's a project-local user declaration
-  if isUserDecl env c then
-    match env.getModuleIdxFor? c with
-    | some idx =>
-      if env.header.moduleNames[idx.toNat]!.getRoot == projectRoot then
-        modify fun s => { s with deps := s.deps.insert c }
-    | none => pure ()
-  -- Recurse into type (always)
-  collectExpr ci.type collectDep
-  -- Recurse into value/constructors (data-carrying only)
-  if !isProofIrrelevant ci then
-    match ci with
-    | .defnInfo v => collectExpr v.value collectDep
-    | .opaqueInfo v => collectExpr v.value collectDep
-    | .inductInfo v => v.ctors.forM collectDep
-    | .ctorInfo _ => collectExpr ci.type collectDep
-    | _ => pure ()
+/-- Resolve a derivative name to its user-facing parent.
+Strips `_private` wrappers via `privateToUserName?`, then checks whether
+`Name.getPrefix` yields a valid user-facing declaration. This catches
+derivatives like `Foo.match_1`, `Foo.ctorIdx`, `Foo.noConfusionType` that
+pass structural checks but aren't user-written. -/
+def resolveToUser (env : Environment) (name : Name) : Name :=
+  let n := (privateToUserName? name).getD name
+  -- If getPrefix is a valid user-facing declaration, prefer it.
+  -- This resolves both structurally-caught derivatives (ctors, recs, etc.)
+  -- and name-pattern derivatives (match_, ctorIdx, noConfusionType, etc.).
+  let p := n.getPrefix
+  if !p.isAnonymous && (env.find? p).isSome && isUserDecl env p then p
+  else if isUserDecl env n then n
+  else if !p.isAnonymous && (env.find? p).isSome then p
+  else n
 
 /-- Compute the transitive closure of data-carrying dependencies for a declaration
-and return their hashes. Only includes project-local, user-written declarations.
-Skips theorem proofs but follows their types. -/
+and return their hashes. Uses `collectDeps` for the raw transitive closure,
+then resolves derivatives to user-facing parents and hashes each.
+Theorem proofs are skipped but their types are followed. -/
 def computeDepHashes (env : Environment) (name : Name) (ci : ConstantInfo)
     : Array (Name × UInt64) := Id.run do
-  let projectRoot := match env.getModuleIdxFor? name with
-    | some idx => env.header.moduleNames[idx.toNat]!.getRoot
-    | none => env.mainModule.getRoot
-  -- Run transitive collection starting from the declaration's type + body
-  let mut s : CollectState := {}
-  s := { s with visited := s.visited.insert name }
-  (_, s) := ((collectExpr ci.type collectDep).run (env, projectRoot)).run s
-  if !isProofIrrelevant ci then
-    match ci with
-    | .defnInfo v =>
-      (_, s) := ((collectExpr v.value collectDep).run (env, projectRoot)).run s
-    | .opaqueInfo v =>
-      (_, s) := ((collectExpr v.value collectDep).run (env, projectRoot)).run s
-    | .inductInfo v =>
-      (_, s) := ((v.ctors.forM collectDep).run (env, projectRoot)).run s
-    | _ => ()
-  -- Hash all collected deps
+  let rawDeps := collectDeps env name ci
+  -- Resolve derivatives to user-facing parents, deduplicate
+  let mut resolved : NameSet := {}
+  for dep in rawDeps.toArray do
+    resolved := resolved.insert (resolveToUser env dep)
+  -- Hash all resolved deps
   let mut result : Array (Name × UInt64) := #[]
-  for dep in s.deps.toArray.qsort Name.lt do
+  for dep in resolved.toArray.qsort Name.lt do
     let some depCi := env.find? dep | continue
     result := result.push (dep, computeHash env dep depCi)
   return result
