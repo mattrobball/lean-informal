@@ -143,7 +143,6 @@ initialize Lean.registerBuiltinAttribute {
       | throwError "declaration '{decl}' not found in environment"
     let contentHash := computeHash env decl ci
     let depHashes := computeDepHashes env decl ci
-    logWarning m!"[informal] {decl}: depHashes.size={depHashes.size} mainModule={env.mainModule}"
     modifyEnv (informalExt.addEntry · {
       declName := decl
       paperRef
