@@ -60,7 +60,9 @@ private def checkCtorIdx? (env : Environment) (name : Name) : Option NonUserReas
 
 private def checkNoRange (ci? : Option ConstantInfo) (env : Environment) (name : Name) :
     Option NonUserReason :=
-  if ci?.isSome && (declRangeExt.find? env name).isNone then
+  if ci?.isSome &&
+      (declRangeExt.find? (level := .exported) env name).isNone &&
+      (declRangeExt.find? (level := .server) env name).isNone then
     some .hasNoRange
   else none
 
