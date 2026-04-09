@@ -58,6 +58,7 @@ structure DeclEntry where
   moduleName : String
   docstring : Option String := none
   contentHash : UInt64 := 0
+  depHashes : Array (String × UInt64) := #[]
   paperRef : Option String := none
   paperComment : Option String := none
   sourceFile : Option String := none
@@ -72,6 +73,9 @@ instance : ToJson DeclEntry where
     ("moduleName", Json.str e.moduleName),
     ("docstring", match e.docstring with | some d => Json.str d | none => Json.null),
     ("contentHash", Json.num (Lean.JsonNumber.fromNat e.contentHash.toNat)),
+    ("depHashes", if e.depHashes.isEmpty then Json.null
+      else Json.arr (e.depHashes.map fun (n, h) =>
+        Json.mkObj [("name", Json.str n), ("hash", Json.num (.fromNat h.toNat))])),
     ("paperRef", match e.paperRef with | some r => Json.str r | none => Json.null),
     ("paperComment", match e.paperComment with | some c => Json.str c | none => Json.null),
     ("sourceFile", match e.sourceFile with | some s => Json.str s | none => Json.null),
@@ -137,6 +141,9 @@ def collectDecls (rootPrefix : Name) : CoreM (Array DeclEntry) := do
         moduleName := getModuleName env name
         docstring := doc
         contentHash := hash
+        depHashes := match informal? with
+          | some e => e.depHashes.map fun (n, h) => (n.toString, h)
+          | none => #[]
         paperRef := informal?.map (·.paperRef)
         paperComment := informal?.bind fun e =>
           if e.comment.isEmpty then none else some e.comment
