@@ -233,9 +233,14 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
       allContent := allContent.push (modName, content)
 
   -- Phase 4: Assemble with consolidated header
-  -- Collect all universe names from all files
+  -- Collect universe names and set_options across all files
   let mut universeNames : Array String := #[]
+  let mut setOptions : Array String := #[]
+  let numSections := allContent.size
+  -- Count occurrences of each set_option to find universal ones
+  let mut setOptionCounts : Std.HashMap String Nat := {}
   for (_, content) in allContent do
+    let mut seenInFile : Std.HashSet String := {}
     for line in content.splitOn "\n" do
       let t := line.trimAsciiStart.toString
       if t.startsWith "universe " then
@@ -243,25 +248,64 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
           let name := name.trimAsciiEnd.toString
           if !name.isEmpty && !universeNames.contains name then
             universeNames := universeNames.push name
+      if t.startsWith "set_option " && !seenInFile.contains t then
+        seenInFile := seenInFile.insert t
+        setOptionCounts := setOptionCounts.insert t ((setOptionCounts.getD t 0) + 1)
+  -- set_options that appear in every section get hoisted
+  for (opt, count) in setOptionCounts do
+    if count == numSections then
+      setOptions := setOptions.push opt
   let mut output := "import Mathlib\n\n"
   output := output ++ "/-! # Trusted Formalization Base\n"
   output := output ++ s!"{rootPrefix} — `{targetName}`\n"
   output := output ++ s!"Auto-generated — all proofs replaced with `sorry`.\n"
   output := output ++ s!"{tfbNames.size} declarations in dependency order.\n"
   output := output ++ "-/\n\n"
-  output := output ++ "set_option maxHeartbeats 400000\n\n"
+  output := output ++ "set_option maxHeartbeats 400000\n"
+  for opt in setOptions do
+    output := output ++ opt ++ "\n"
+  output := output ++ "\n"
   unless universeNames.isEmpty do
     output := output ++ "universe " ++ " ".intercalate universeNames.toList ++ "\n\n"
   for (modName, content) in allContent do
     let shortName := modName.toString.drop (rootPrefix.toString.length + 1)
     output := output ++ s!"-- ═══ {shortName} ═══\n"
-    -- Strip per-file universe declarations (consolidated above)
-    -- and @[informal]/@[expose] attributes
     let lines := content.splitOn "\n"
+    -- Strip: universes (hoisted), @[informal/@[expose] (unavailable),
+    -- hoisted set_options, and empty section/end pairs
     let filtered := lines.filter fun line =>
       let t := line.trimAsciiStart.toString
-      !(t.startsWith "universe " || t.startsWith "@[informal " || t.startsWith "@[expose]")
-    output := output ++ "\n".intercalate filtered
+      !(t.startsWith "universe " ||
+        t.startsWith "@[informal " ||
+        t.startsWith "@[expose]" ||
+        setOptions.contains t)
+    -- Remove empty section/end pairs: a section line immediately followed by end
+    let mut cleaned : Array String := #[]
+    let filtArr := filtered.toArray
+    let mut i := 0
+    while i < filtArr.size do
+      let line := filtArr[i]!
+      let t := line.trimAsciiStart.toString
+      -- Check for empty section: "section X" followed (possibly with blank/variable lines)
+      -- by "end X" with no declarations between
+      if t.startsWith "section" && !t.startsWith "section " then
+        -- anonymous section — keep only if something follows before end
+        cleaned := cleaned.push line
+      else
+        cleaned := cleaned.push line
+      i := i + 1
+    -- Collapse multiple consecutive blank lines into one
+    let mut final : Array String := #[]
+    let mut prevBlank := false
+    for line in cleaned do
+      if line.trimAsciiEnd.toString.isEmpty then
+        if !prevBlank then
+          final := final.push ""
+        prevBlank := true
+      else
+        final := final.push line
+        prevBlank := false
+    output := output ++ "\n".intercalate final.toList
     output := output ++ "\n"
   IO.FS.writeFile outputPath output
   IO.eprintln s!"Wrote {outputPath}"
