@@ -279,21 +279,36 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
         t.startsWith "@[informal " ||
         t.startsWith "@[expose]" ||
         setOptions.contains t)
-    -- Remove empty section/end pairs: a section line immediately followed by end
-    let mut cleaned : Array String := #[]
+    -- Remove empty section/end pairs: sections containing only variable/blank lines
     let filtArr := filtered.toArray
+    let mut cleaned : Array String := #[]
     let mut i := 0
     while i < filtArr.size do
-      let line := filtArr[i]!
-      let t := line.trimAsciiStart.toString
-      -- Check for empty section: "section X" followed (possibly with blank/variable lines)
-      -- by "end X" with no declarations between
-      if t.startsWith "section" && !t.startsWith "section " then
-        -- anonymous section — keep only if something follows before end
-        cleaned := cleaned.push line
+      let t := filtArr[i]!.trimAsciiStart.toString
+      if t.startsWith "section" then
+        -- Scan ahead: if only variable/blank/end lines until matching end, skip block
+        let mut j := i + 1
+        let mut isEmpty := true
+        let mut endIdx := i  -- will be set to the end line index
+        while j < filtArr.size do
+          let u := filtArr[j]!.trimAsciiStart.toString
+          if u.startsWith "end" || u == "end" then
+            endIdx := j
+            break
+          else if u.isEmpty || u.startsWith "variable" then
+            j := j + 1
+          else
+            isEmpty := false
+            break
+        if isEmpty && endIdx > i then
+          -- Skip the entire empty section block
+          i := endIdx + 1
+        else
+          cleaned := cleaned.push filtArr[i]!
+          i := i + 1
       else
-        cleaned := cleaned.push line
-      i := i + 1
+        cleaned := cleaned.push filtArr[i]!
+        i := i + 1
     -- Collapse multiple consecutive blank lines into one
     let mut final : Array String := #[]
     let mut prevBlank := false
