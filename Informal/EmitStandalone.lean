@@ -16,10 +16,9 @@ Given a compiled Lean environment and a target declaration name, generates a
 single standalone `.lean` file containing all transitive type-level dependencies
 (the Trusted Formalization Base) with proofs replaced by `sorry`.
 
-Uses InfoTree re-elaboration to extract original Syntax for each command, with
-surgical `declVal` replacement for sorry injection. Each source file is
-re-elaborated independently via `IO.processCommands`. Declarations ordered by
-Kahn's topological sort.
+Uses InfoTree re-elaboration (reusing the project env) to get per-command
+Syntax. Matches commands to TFB declarations via DeclarationRanges byte
+positions. Surgical `declVal` replacement for sorry injection.
 -/
 
 public meta section
@@ -92,9 +91,8 @@ def topologicalSort (env : Environment) (names : Std.HashSet Name) : Array Name 
       result := result.push n
   result.reverse
 
--- ═══ Phase 3: InfoTree-based source extraction ═══
+-- ═══ Phase 3: Per-command extraction (tested in Test/ExtractTest.lean) ═══
 
-/-- Find a `declVal` node in a Syntax tree (worklist BFS). -/
 def findDeclVal? (root : Syntax) : Option (String.Pos.Raw × String.Pos.Raw) := Id.run do
   let mut worklist : Array Syntax := #[root]
   while !worklist.isEmpty do
@@ -111,7 +109,6 @@ def findDeclVal? (root : Syntax) : Option (String.Pos.Raw × String.Pos.Raw) := 
       worklist := worklist.push arg
   return none
 
-/-- Check if a Syntax contains a sorry-able declaration kind. -/
 def hasSorryableKind (root : Syntax) : Bool := Id.run do
   let mut worklist : Array Syntax := #[root]
   while !worklist.isEmpty do
@@ -126,7 +123,6 @@ def hasSorryableKind (root : Syntax) : Bool := Id.run do
       worklist := worklist.push arg
   return false
 
-/-- Check if a Syntax is a context-setting command. -/
 def isContextCmd (stx : Syntax) : Bool :=
   let k := stx.getKind
   k == ``Parser.Command.namespace ||
@@ -135,42 +131,25 @@ def isContextCmd (stx : Syntax) : Bool :=
   k == ``Parser.Command.variable ||
   k == ``Parser.Command.«section» ||
   k == ``Parser.Command.set_option ||
-  k == ``Parser.Command.universe ||
-  k == ``Parser.Command.attribute
+  k == ``Parser.Command.universe
 
-/-- Look up declaration ranges from the environment extension. -/
 def findDeclRanges? (env : Environment) (name : Name) : Option DeclarationRanges :=
   declRangeExt.find? (level := .exported) env name <|>
     declRangeExt.find? (level := .server) env name
 
-def needsSorry (env : Environment) (name : Name) : Bool :=
-  match env.find? name with
-  | some (.thmInfo _) => true
-  | some (.defnInfo _) =>
-    if (Lean.getReducibilityStatusCore env name) == .reducible then false
-    else true
-  | some (.opaqueInfo _) => false
-  | _ => false
-
-/-- Re-elaborate a source file and extract TFB-relevant content with sorry injection.
-
-    Uses `IO.processCommands` (one file at a time) to get the full command
-    list and InfoTrees. Walks the `Frontend.State.commands` array paired with
-    environment snapshots from InfoTrees to identify which commands declare
-    TFB names. -/
-def processFile (filePath : System.FilePath) (tfbNames : Std.HashSet Name)
-    (projectEnv : Environment)
-    (tfbRangeMap : Std.HashMap String.Pos.Raw Name) : IO String := do
-  IO.eprintln s!"  Re-elaborating {filePath}"
-  let input ← IO.FS.readFile filePath
-  let inputCtx := Parser.mkInputContext input filePath.toString
-  -- Parse header to advance past imports, reuse the project's env
+/-- Process one source file: re-elaborate against project env, extract TFB
+    declarations with sorry injection, keep minimal context commands. -/
+def processFile (source : String) (projectEnv : Environment)
+    (tfbRangeMap : Std.HashMap String.Pos.Raw Name)
+    (filePath : String) : IO String := do
+  let inputCtx := Parser.mkInputContext source filePath
   let (_, parserState, messages) ← Parser.parseHeader inputCtx
   let cmdState := { Command.mkState projectEnv messages {} with infoState.enabled := true }
   let finalState ← IO.processCommands inputCtx parserState cmdState
   let trees := finalState.commandState.infoState.trees.toArray
   let mut output := ""
-  for tree in trees do
+  for i in [:trees.size] do
+    let tree := trees[i]!
     let cmdResult := tree.foldInfo (init := none) fun _ctx info acc =>
       match acc with
       | some _ => acc
@@ -181,25 +160,24 @@ def processFile (filePath : System.FilePath) (tfbNames : Std.HashSet Name)
     let some stx := cmdResult | continue
     let some cmdStart := stx.getPos? | continue
     let some cmdEnd := stx.getTailPos? | continue
-    let cmdSrc := (Substring.Raw.mk input cmdStart cmdEnd).toString
-    -- Skip header
+    let cmdSrc := (Substring.Raw.mk source cmdStart cmdEnd).toString
     if stx.getKind == ``Parser.Module.header then continue
-    -- Match this command to a TFB declaration using source positions:
-    -- check if any TFB declaration's start position falls within this command
+    -- Match to TFB by byte position
     let mut declaredTFBName : Option Name := none
     for (pos, name) in tfbRangeMap do
       if pos >= cmdStart && pos < cmdEnd then
         declaredTFBName := some name
         break
     match declaredTFBName with
-    | some name =>
-      if needsSorry projectEnv name && hasSorryableKind stx then
+    | some _name =>
+      if hasSorryableKind stx then
         if let some (valStart, _) := findDeclVal? stx then
-          let beforeVal := (Substring.Raw.mk input cmdStart valStart).toString
+          let beforeVal := (Substring.Raw.mk source cmdStart valStart).toString
           output := output ++ beforeVal ++ " := sorry\n"
         else
           output := output ++ cmdSrc ++ "\n"
       else
+        -- Structure/class/inductive/abbrev: keep verbatim
         output := output ++ cmdSrc ++ "\n"
     | none =>
       if isContextCmd stx then
@@ -211,61 +189,64 @@ def processFile (filePath : System.FilePath) (tfbNames : Std.HashSet Name)
 def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     (outputPath : System.FilePath)
     (excludePrefixes : Array Name := #[]) : IO Unit := do
+  -- Phase 1: TFB names
   let tfbNames ← match computeTFBNames env rootPrefix targetName excludePrefixes with
     | .ok names => pure names
     | .error msg => throw (IO.userError msg)
   IO.eprintln s!"TFB: {tfbNames.size} declarations"
-  let sorted := topologicalSort env tfbNames
-  -- Module order: use module index from env.header.moduleNames (= import DAG order)
+
+  -- Phase 2: Module order from env.header.moduleNames (= import DAG order)
   let mut moduleSet : Std.HashSet Name := {}
   for name in tfbNames do
     if let some idx := env.getModuleIdxFor? name then
       moduleSet := moduleSet.insert env.header.moduleNames[idx.toNat]!
-  -- Sort modules by their index in the environment (= import DAG topological order)
   let mut modIdxPairs : Array (Name × Nat) := #[]
   for i in [:env.header.moduleNames.size] do
     let modName := env.header.moduleNames[i]!
     if moduleSet.contains modName then
       modIdxPairs := modIdxPairs.push (modName, i)
-  let seenModules := (modIdxPairs.qsort fun a b => a.2 < b.2).map (·.1)
-  IO.eprintln s!"TFB spans {seenModules.size} modules"
-  -- Build range map: source byte position → TFB name (for matching commands to decls)
-  let mut tfbRangeMap : Std.HashMap String.Pos.Raw Name := {}
-  for name in tfbNames do
-    if let some ranges := findDeclRanges? env name then
-      let filePath := match env.getModuleIdxFor? name with
-        | some idx => env.header.moduleNames[idx.toNat]!.toString.replace "." "/" ++ ".lean"
-        | none => ""
-      let source ← IO.FS.readFile filePath
-      let fileMap := FileMap.ofString source
-      let bytePos := fileMap.ofPosition ranges.range.pos
-      tfbRangeMap := tfbRangeMap.insert bytePos name
-  let mut fileContents : Array String := #[]
-  for modName in seenModules do
+  let orderedModules := (modIdxPairs.qsort fun a b => a.2 < b.2).map (·.1)
+  IO.eprintln s!"TFB spans {orderedModules.size} modules"
+
+  -- Phase 3: Build tfbRangeMap per module and process each file
+  let mut allContent : Array (Name × String) := #[]
+  for modName in orderedModules do
     let filePath := modName.toString.replace "." "/" ++ ".lean"
-    let content ← processFile filePath tfbNames env tfbRangeMap
+    let source ← IO.FS.readFile filePath
+    let fileMap := FileMap.ofString source
+    -- Build range map for TFB names in this module
+    let mut tfbRangeMap : Std.HashMap String.Pos.Raw Name := {}
+    for name in tfbNames do
+      if let some idx := env.getModuleIdxFor? name then
+        if env.header.moduleNames[idx.toNat]! == modName then
+          if let some ranges := findDeclRanges? env name then
+            let bytePos := fileMap.ofPosition ranges.range.pos
+            tfbRangeMap := tfbRangeMap.insert bytePos name
+    IO.eprintln s!"  {filePath} ({tfbRangeMap.size} TFB decls)"
+    let content ← processFile source env tfbRangeMap filePath
     if !content.trimAsciiEnd.toString.isEmpty then
-      let shortName := modName.toString.drop (rootPrefix.toString.length + 1)
-      fileContents := fileContents.push (s!"\n-- ═══ {shortName} ═══\n" ++ content)
-  let mut output := ""
-  output := output ++ "import Mathlib\n\n"
+      allContent := allContent.push (modName, content)
+
+  -- Phase 4: Assemble with consolidated header
+  let mut output := "import Mathlib\n\n"
   output := output ++ "/-! # Trusted Formalization Base\n"
   output := output ++ s!"{rootPrefix} — `{targetName}`\n"
   output := output ++ s!"Auto-generated — all proofs replaced with `sorry`.\n"
   output := output ++ s!"{tfbNames.size} declarations in dependency order.\n"
-  output := output ++ "-/\n"
-  for content in fileContents do
-    output := output ++ content
-  -- Strip @[informal ...] attributes (not available without importing Informal)
-  -- Also strip @[expose] (project-specific)
-  let mut cleaned := output
-  -- Remove lines that are just @[informal ...] or @[expose] attributes
-  let lines := cleaned.splitOn "\n"
-  let filtered := lines.filter fun line =>
-    let t := line.trimAsciiStart.toString
-    !(t.startsWith "@[informal " || t.startsWith "@[expose]")
-  cleaned := "\n".intercalate filtered
-  IO.FS.writeFile outputPath cleaned
+  output := output ++ "-/\n\n"
+  output := output ++ "set_option maxHeartbeats 400000\n\n"
+  for (modName, content) in allContent do
+    let shortName := modName.toString.drop (rootPrefix.toString.length + 1)
+    output := output ++ s!"-- ═══ {shortName} ═══\n"
+    -- Strip duplicate universe declarations (they'll conflict across files)
+    -- and @[informal]/@[expose] attributes
+    let lines := content.splitOn "\n"
+    let filtered := lines.filter fun line =>
+      let t := line.trimAsciiStart.toString
+      !(t.startsWith "universe " || t.startsWith "@[informal " || t.startsWith "@[expose]")
+    output := output ++ "\n".intercalate filtered
+    output := output ++ "\n"
+  IO.FS.writeFile outputPath output
   IO.eprintln s!"Wrote {outputPath}"
 
 end Informal.EmitStandalone
