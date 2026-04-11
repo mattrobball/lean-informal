@@ -498,14 +498,13 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   unless universeNames.isEmpty do
     output := output ++ "universe " ++ " ".intercalate universeNames.toList ++ "\n\n"
 
-  -- Emit rangeless declarations (elaborator-generated, no source) from environment.
-  -- These come BEFORE source-extracted modules since source decls may depend on them.
+  -- Pretty-print rangeless declarations and insert them into their module's entries.
+  -- These are elaborator-generated decls with no source ranges.
   if !rangelessNames.isEmpty then
-    output := output ++ "-- ═══ Elaborator-generated declarations ═══\n\n"
     let ctx : Core.Context := { fileName := "<emit>", fileMap := default }
     let state : Core.State := { env }
     let (ppResults, _) ← (do
-      let mut results : Array String := #[]
+      let mut results : Array (Name × String) := #[]
       for name in rangelessNames do
         let some ci := env.find? name | continue
         let decl ← (do
@@ -517,11 +516,36 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
             return s!"def {sig.fmt} :=\n  {val}"
           | _ => return s!"-- {name}: unsupported kind for rangeless emission"
           : MetaM String).run'
-        results := results.push decl
+        results := results.push (name, decl)
       return results : CoreM _).toIO ctx state
-    for pp in ppResults do
-      output := output ++ "\n" ++ pp ++ "\n"
-    output := output ++ "\n"
+    for (name, ppSrc) in ppResults do
+      let modName := match env.getModuleIdxFor? name with
+        | some idx => env.header.moduleNames[idx.toNat]!
+        | none => `unknown
+      let entry : CommandEntry := {
+        cls := .tfbDecl false
+        src := ppSrc
+        kind := ``Parser.Command.declaration
+        startPos := 0
+        endPos := 0
+      }
+      -- Find the module and prepend the entry before other TFB decls
+      -- Insert before the last TFB decl (typically the target theorem that
+      -- depends on this rangeless decl). This places it after source-extracted
+      -- definitions but before the theorems that use it.
+      allModules := allModules.map fun mc => Id.run do
+        if mc.modName == modName then
+          -- Find the last TFB decl index
+          let mut lastTFBIdx := mc.entries.size
+          let mut i := mc.entries.size
+          while i > 0 do
+            i := i - 1
+            if let .tfbDecl _ := mc.entries[i]!.cls then
+              lastTFBIdx := i
+              break
+          let newEntries := mc.entries[:lastTFBIdx].toArray ++ #[entry] ++ mc.entries[lastTFBIdx:].toArray
+          return { mc with entries := newEntries }
+        else return mc
 
   -- Emit modules. Each module emits context + TFB declarations in source order.
   -- Hoisted set_options and universes are skipped. Spacing between sections.
