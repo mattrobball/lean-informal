@@ -2,7 +2,11 @@
 lake exe tfb_skeleton — generate a standalone TFB file from a compiled project.
 
 Usage (from the downstream project directory):
-  lake exe tfb_skeleton <rootPrefix> <targetDecl> <outputPath>
+  lake exe tfb_skeleton [--include-macros] <rootPrefix> <targetDecl> <outputPath>
+
+Options:
+  --include-macros  Include macro definitions instead of expanding them.
+                    Default: expand macros to their output syntax.
 
 Example:
   lake exe tfb_skeleton BridgelandStability \
@@ -14,7 +18,14 @@ import Informal
 open Lean Informal.EmitStandalone
 
 unsafe def main (args : List String) : IO Unit := do
-  match args with
+  let mut cfg : Config := {}
+  let mut positional : Array String := #[]
+  for arg in args do
+    if arg == "--include-macros" then
+      cfg := { cfg with macroHandling := .includeMacroDef }
+    else
+      positional := positional.push arg
+  match positional.toList with
   | [root, target, output] =>
     initSearchPath (← findSysroot)
     enableInitializersExecution
@@ -27,7 +38,7 @@ unsafe def main (args : List String) : IO Unit := do
     -- Discovered via Test/ExeVsElab.lean: the elab command path gets extensions
     -- automatically from `import`, but `importModules` defaults to `loadExts := false`.
     let env ← importModules (loadExts := true) #[{ module := rootName }] {} (trustLevel := 1024)
-    emitStandalone env rootName targetName output
+    emitStandalone env rootName targetName output (cfg := cfg)
   | _ =>
-    IO.eprintln "Usage: lake exe tfb_skeleton <rootPrefix> <targetDecl> <outputPath>"
+    IO.eprintln "Usage: lake exe tfb_skeleton [--include-macros] <rootPrefix> <targetDecl> <outputPath>"
     IO.Process.exit 1

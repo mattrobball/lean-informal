@@ -137,6 +137,8 @@ structure CommandEntry where
   cls : CmdClass
   src : String               -- source text (with sorry injection if applicable)
   kind : SyntaxNodeKind      -- the Syntax kind from the InfoTree
+  startPos : String.Pos.Raw := 0  -- byte position in source file
+  endPos : String.Pos.Raw := 0
   deriving Inhabited
 
 def findDeclVal? (root : Syntax) : Option (String.Pos.Raw × String.Pos.Raw) := Id.run do
@@ -231,6 +233,7 @@ def processFile (source : String) (projectEnv : Environment)
   let finalState ← IO.processCommands inputCtx parserState cmdState
   let trees := finalState.commandState.infoState.trees.toArray
   let mut entries : Array CommandEntry := #[]
+  let mut neededMacroKinds : Std.HashSet SyntaxNodeKind := {}
   for i in [:trees.size] do
     let tree := trees[i]!
     let cmdResult := tree.foldInfo (init := none) fun _ctx info acc =>
@@ -255,15 +258,19 @@ def processFile (source : String) (projectEnv : Environment)
         break
     match declaredTFBName with
     | some tfbName =>
-      -- If this command is a macro (non-standard kind) and we're expanding, use the
-      -- expanded syntax from MacroExpansionInfo instead of the original source.
+      -- If this command is a macro (non-standard kind), handle per config
       let isMacroCmd := topKind != ``Parser.Command.declaration && !isContextCmd stx
       let mut effectiveSrc := cmdSrc
       let mut effectiveStx := stx
-      if isMacroCmd && cfg.macroHandling == .expand then
-        if let some expandedStx := findMacroExpansion? tree then
-          effectiveSrc ← ppCommandStr projectEnv expandedStx
-          effectiveStx := expandedStx
+      if isMacroCmd then
+        match cfg.macroHandling with
+        | .expand =>
+          if let some expandedStx := findMacroExpansion? tree then
+            effectiveSrc ← ppCommandStr projectEnv expandedStx
+            effectiveStx := expandedStx
+        | .includeMacroDef =>
+          -- Record macro kinds we need definitions for (collected after the loop)
+          neededMacroKinds := neededMacroKinds.insert topKind
       let isThmInEnv := match projectEnv.find? tfbName with
         | some (.thmInfo _) => true
         | _ => false
@@ -271,19 +278,54 @@ def processFile (source : String) (projectEnv : Environment)
         if let some (valStart, _) := findDeclVal? effectiveStx then
           if isMacroCmd && cfg.macroHandling == .expand then
             -- For expanded macros, sorry the whole thing
-            entries := entries.push { cls := .tfbDecl true, src := effectiveSrc, kind := topKind }
+            entries := entries.push { startPos := cmdStart, endPos := cmdEnd, cls := .tfbDecl true, src := effectiveSrc, kind := topKind }
           else
             let beforeVal := (Substring.Raw.mk source cmdStart valStart).toString
-            entries := entries.push { cls := .tfbDecl true, src := beforeVal ++ " := sorry", kind := topKind }
+            entries := entries.push { startPos := cmdStart, endPos := cmdEnd, cls := .tfbDecl true, src := beforeVal ++ " := sorry", kind := topKind }
         else
-          entries := entries.push { cls := .tfbDecl true, src := effectiveSrc, kind := topKind }
+          entries := entries.push { startPos := cmdStart, endPos := cmdEnd, cls := .tfbDecl true, src := effectiveSrc, kind := topKind }
       else
-        entries := entries.push { cls := .tfbDecl false, src := effectiveSrc, kind := topKind }
+        entries := entries.push { startPos := cmdStart, endPos := cmdEnd, cls := .tfbDecl false, src := effectiveSrc, kind := topKind }
     | none =>
       if isContextCmd stx then
-        entries := entries.push { cls := .context, src := cmdSrc, kind := topKind }
+        entries := entries.push { startPos := cmdStart, endPos := cmdEnd, cls := .context, src := cmdSrc, kind := topKind }
       else
-        entries := entries.push { cls := .skip, src := cmdSrc, kind := topKind }
+        entries := entries.push { startPos := cmdStart, endPos := cmdEnd, cls := .skip, src := cmdSrc, kind := topKind }
+  -- Second pass: for includeMacroDef mode, find macro definition commands
+  -- for any macro kinds that TFB declarations need, and reclassify them
+  -- from .skip to .context so they appear in the output.
+  if cfg.macroHandling == .includeMacroDef && !neededMacroKinds.isEmpty then
+    -- Look up macro declaration names via macroAttribute
+    let mut neededDeclPositions : Std.HashSet String.Pos.Raw := {}
+    let fileMap := FileMap.ofString source
+    for kind in neededMacroKinds do
+      for me in macroAttribute.getEntries projectEnv kind do
+        if let some ranges := findDeclRanges? projectEnv me.declName then
+          neededDeclPositions := neededDeclPositions.insert (fileMap.ofPosition ranges.range.pos)
+    -- TODO: findDeclRanges? returns none for meta declarations when using
+    -- importModules (ranges may only exist at .server level). This means
+    -- includeMacroDef mode doesn't work from lake exe; it may work from
+    -- the #emit_standalone elab command where the server populates ranges.
+    -- For now, fall back to expand mode if no positions found.
+    if neededDeclPositions.isEmpty then
+      IO.eprintln s!"  Warning: could not find macro definition ranges for includeMacroDef mode"
+      IO.eprintln s!"  Macro calls will be emitted as-is (may not compile without the macro definition)"
+    -- Reclassify .skip entries that contain a needed macro definition
+    let mut newEntries : Array CommandEntry := #[]
+    for e in entries do
+      if e.cls == .skip then
+        let mut isMacroDef := false
+        for pos in neededDeclPositions do
+          if pos >= e.startPos && pos < e.endPos then
+            isMacroDef := true
+            break
+        if isMacroDef then
+          newEntries := newEntries.push { e with cls := .context }
+        else
+          newEntries := newEntries.push e
+      else
+        newEntries := newEntries.push e
+    return newEntries
   return entries
 
 -- ═══ Phase 4: Assembly ═══
