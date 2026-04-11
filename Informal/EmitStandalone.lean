@@ -295,7 +295,8 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
           if u.startsWith "end" || u == "end" then
             endIdx := j
             break
-          else if u.isEmpty || u.startsWith "variable" then
+          else if u.isEmpty || u.startsWith "variable" ||
+              u.startsWith "[" || u.startsWith "(" || u.startsWith "{" then
             j := j + 1
           else
             isEmpty := false
