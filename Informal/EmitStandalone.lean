@@ -309,24 +309,82 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   unless universeNames.isEmpty do
     output := output ++ "universe " ++ " ".intercalate universeNames.toList ++ "\n\n"
 
-  -- Emit modules. Each module emits its context commands (from the source, including
-  -- section/end pairs) and its TFB declarations. Context commands identified by Syntax
-  -- kind; hoisted set_options and universes are skipped.
+  -- Split each module's entries into preamble / body / postamble.
+  -- Preamble = context entries before first TFB decl
+  -- Body = everything from first TFB decl to last TFB decl (inclusive), context + decls
+  -- Postamble = context entries after last TFB decl (typically `end` statements)
+  let splitEntries (entries : Array CommandEntry) :
+      Array CommandEntry × Array CommandEntry × Array CommandEntry := Id.run do
+    -- Find first and last TFB decl indices
+    let mut firstTFB := entries.size
+    let mut lastTFB := 0
+    for i in [:entries.size] do
+      match entries[i]!.cls with
+      | .tfbDecl _ =>
+        if i < firstTFB then firstTFB := i
+        lastTFB := i
+      | _ => pure ()
+    if firstTFB >= entries.size then return (#[], #[], #[])
+    let preamble := entries[:firstTFB]
+    let body := entries[firstTFB:lastTFB + 1]
+    let postamble := entries[lastTFB + 1:]
+    (preamble.toArray, body.toArray, postamble.toArray)
+  -- Extract the "core preamble" for comparison: namespace/open/noncomputable entries only
+  -- (not variable/section/set_option — those can differ while still being mergeable)
+  let corePreamble (preamble : Array CommandEntry) : Array String := Id.run do
+    let mut core : Array String := #[]
+    for e in preamble do
+      if e.kind == ``Parser.Command.namespace ||
+         e.kind == ``Parser.Command.open then
+        core := core.push e.src
+    core
+  let isSkippable (e : CommandEntry) : Bool :=
+    e.kind == ``Parser.Command.universe ||
+    (e.kind == ``Parser.Command.set_option && hoistedOpts.contains e.src)
+  -- Emit modules with merging
+  let mut prevCore : Array String := #[]
+  let mut prevPostamble : Array CommandEntry := #[]
+  let mut isFirst := true
   for mc in allModules do
     let hasTFB := mc.entries.any fun e => match e.cls with | .tfbDecl _ => true | _ => false
     if !hasTFB then continue
     let shortName := mc.modName.toString.drop (rootPrefix.toString.length + 1)
-    output := output ++ s!"-- ═══ {shortName} ═══\n\n"
-    -- Emit context and declarations in source order
-    for e in mc.entries do
+    let (preamble, body, postamble) := splitEntries mc.entries
+    let thisCore := corePreamble preamble
+    if thisCore == prevCore && !isFirst then
+      -- Merge: skip previous postamble (already not emitted) and this preamble.
+      -- Emit sub-header and any new variable declarations from preamble.
+      output := output ++ s!"\n-- ─── {shortName} ───\n\n"
+      for e in preamble do
+        if e.kind == ``Parser.Command.variable then
+          output := output ++ e.src ++ "\n"
+    else
+      -- Different context: emit previous postamble, then new section
+      if !isFirst then
+        for e in prevPostamble do
+          if !isSkippable e then
+            output := output ++ e.src ++ "\n"
+        output := output ++ "\n"
+      output := output ++ s!"-- ═══ {shortName} ═══\n\n"
+      for e in preamble do
+        if !isSkippable e then
+          output := output ++ e.src ++ "\n"
+    -- Emit body (context + declarations interleaved)
+    for e in body do
       match e.cls with
       | .context =>
-        if e.kind == ``Parser.Command.universe then continue  -- hoisted to top
-        if e.kind == ``Parser.Command.set_option && hoistedOpts.contains e.src then continue
-        output := output ++ e.src ++ "\n"
+        if !isSkippable e then
+          output := output ++ e.src ++ "\n"
       | .tfbDecl _ =>
         output := output ++ e.src ++ "\n"
       | .skip => pure ()
+    prevCore := thisCore
+    prevPostamble := postamble
+    isFirst := false
+  -- Emit final postamble
+  for e in prevPostamble do
+    if !isSkippable e then
+      output := output ++ e.src ++ "\n"
 
   -- Strip @[informal]/@[expose] from output (these attributes require importing Informal).
   -- We identify them by string prefix since they're embedded in declaration source text,
