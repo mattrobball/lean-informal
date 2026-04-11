@@ -307,10 +307,10 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     -- Extract just namespace/noncomputable/open lines (not variable/end)
     let coreCtx := ctx.filter fun line =>
       let t := line.trimAsciiStart.toString
-      t.startsWith "noncomputable" || t.startsWith "open " || t.startsWith "namespace "
+      t.startsWith "noncomputable section" || t.startsWith "open " || t.startsWith "namespace "
     let prevCoreCtx := prevContext.filter fun line =>
       let t := line.trimAsciiStart.toString
-      t.startsWith "noncomputable" || t.startsWith "open " || t.startsWith "namespace "
+      t.startsWith "noncomputable section" || t.startsWith "open " || t.startsWith "namespace "
     if coreCtx == prevCoreCtx && !prevContext.isEmpty then
       -- Same context — just emit section header comment and declarations
       output := output ++ s!"\n-- ─── {shortName} ───\n"
