@@ -259,21 +259,12 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   IO.eprintln s!"Target module: {targetModName}"
   IO.eprintln s!"Imported modules: {importedModules.size}"
 
-  -- Phase 1b: TFB names — filter out declarations already available from imports
+  -- Phase 1b: TFB names — keep all project-local declarations.
+  -- For a TFB audit, we want to show everything the reader must trust.
   let tfbNames ← match computeTFBNames env rootPrefix targetName excludePrefixes with
     | .ok names => pure names
     | .error msg => throw (IO.userError msg)
-  -- Remove TFB names whose module is already imported
-  let mut filteredNames : Std.HashSet Name := {}
-  for name in tfbNames do
-    match env.getModuleIdxFor? name with
-    | some idx =>
-      let modName := env.header.moduleNames[idx.toNat]!
-      if !importedModules.contains modName then
-        filteredNames := filteredNames.insert name
-    | none => filteredNames := filteredNames.insert name
-  IO.eprintln s!"TFB: {tfbNames.size} total, {filteredNames.size} need emitting"
-  let tfbNames := filteredNames
+  IO.eprintln s!"TFB: {tfbNames.size} declarations"
 
   -- Phase 2: Module order from env.header.moduleNames (= import DAG order).
   -- Verified in Lean/Environment.lean:2120-2123: `importModulesCore` calls `goRec mod`
@@ -345,22 +336,32 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   for (src, count) in setOptionCounts do
     if count == numTFBModules then hoistedOpts := hoistedOpts.push src
 
-  -- Emit header — import the target module's direct imports
-  -- (which transitively cover all dependencies)
+  -- Emit header — import only external dependencies (e.g., Mathlib).
+  -- Project-local modules are NOT imported; their TFB declarations are emitted.
+  -- This ensures the standalone file shows all trusted declarations explicitly.
   let mut output := ""
-  -- Get target module's direct imports from the environment header
-  let targetImports : Array Name := Id.run do
-    if targetModName == env.header.mainModule then
-      return env.header.imports.map Import.module
-    match env.getModuleIdx? targetModName with
-    | some idx => return env.header.moduleData[idx.toNat]!.imports.map Import.module
-    | none => return #[]
-  if targetImports.isEmpty then
-    output := output ++ "import Mathlib\n"
-  else
-    for imp in targetImports do
-      if imp != `Init then
+  let mut emittedImports : Std.HashSet Name := {}
+  -- Collect all imports from TFB modules that are external (not under rootPrefix)
+  for modName in orderedModules do
+    match env.getModuleIdx? modName with
+    | some idx =>
+      let imports := env.header.moduleData[idx.toNat]!.imports.map Import.module
+      for imp in imports do
+        if imp != `Init && !rootPrefix.isPrefixOf imp && !emittedImports.contains imp then
+          emittedImports := emittedImports.insert imp
+          output := output ++ s!"import {imp}\n"
+    | none => pure ()
+  -- Also import direct imports of the target module that are external
+  match env.getModuleIdx? targetModName with
+  | some idx =>
+    let imports := env.header.moduleData[idx.toNat]!.imports.map Import.module
+    for imp in imports do
+      if imp != `Init && !rootPrefix.isPrefixOf imp && !emittedImports.contains imp then
+        emittedImports := emittedImports.insert imp
         output := output ++ s!"import {imp}\n"
+  | none => pure ()
+  if emittedImports.isEmpty then
+    output := output ++ "import Mathlib\n"
   output := output ++ "\n"
   output := output ++ "/-! # Trusted Formalization Base\n"
   output := output ++ s!"{rootPrefix} — `{targetName}`\n"
