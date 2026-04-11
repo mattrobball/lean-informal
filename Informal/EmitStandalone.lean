@@ -123,11 +123,11 @@ def sorryifySource (source : String) : String := Id.run do
   if foundAssign then
     let useAssign := !foundWhere || assignIdx < whereIdx
     if useAssign then
-      let head := String.mk (chars.take assignIdx)
-      return head.trimRight ++ " := sorry"
+      let head := String.ofList (chars.take assignIdx)
+      return head.trimAsciiEnd.toString ++ " := sorry"
   if foundWhere then
-    let head := String.mk (chars.take whereIdx)
-    return head.trimRight ++ " := sorry"
+    let head := String.ofList (chars.take whereIdx)
+    return head.trimAsciiEnd.toString ++ " := sorry"
   return source
 
 -- ═══ Phase 3: File assembly ═══
@@ -159,7 +159,7 @@ def processModule (env : Environment) (modName : Name) (rootPrefix : Name)
   -- 1. Context lines: everything before the first TFB declaration that isn't an import/module
   for i in [:earliestLine - 1] do
     let line := lines[i]!
-    let trimmed := line.trimLeft
+    let trimmed := line.trimAsciiStart.toString
     -- Skip import and module lines
     if trimmed.startsWith "import " || trimmed.startsWith "public import " ||
        trimmed.startsWith "meta import " || trimmed.startsWith "public meta import " ||
@@ -181,7 +181,7 @@ def processModule (env : Environment) (modName : Name) (rootPrefix : Name)
   let lastEnd := rangeEntries.foldl (fun acc (_, _, el) => max acc el) 0
   for i in [lastEnd : lines.size] do
     let line := lines[i]!
-    let trimmed := line.trimLeft
+    let trimmed := line.trimAsciiStart.toString
     if trimmed.startsWith "end " || trimmed == "end" then
       out := out ++ line ++ "\n"
 
