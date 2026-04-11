@@ -76,7 +76,7 @@ def needsSorry (env : Environment) (name : Name) : Bool :=
   | some (.thmInfo _) => true
   | some (.defnInfo _) =>
     -- Abbrevs should keep their bodies (needed for reducibility)
-    if (Lean.getReducibilityStatus env name) == .reducible then false
+    if (Lean.getReducibilityStatusCore env name) == .reducible then false
     else true
   | some (.opaqueInfo _) => false  -- already opaque
   | _ => false
@@ -110,7 +110,7 @@ def sorryifySource (source : String) : String := Id.run do
           assignIdx := i
     | 'w' =>
       if round == 0 && curly == 0 && square == 0 then
-        let rest := String.mk (chars.drop i |>.take 5)
+        let rest := String.ofList (chars.drop i |>.take 5)
         if rest == "where" then
           let prevOk := i == 0 || (chars[i-1]!).isWhitespace
           let nextOk := i + 5 >= chars.length || (chars[i+5]!).isWhitespace
