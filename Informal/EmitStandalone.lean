@@ -7,7 +7,6 @@ module
 
 public meta import Informal.Deps
 public meta import Informal.Classify
-public meta import Informal.Extract
 public meta import Lean
 
 /-!
@@ -64,6 +63,11 @@ def orderModules (env : Environment) (modules : Array Name) : Array Name := Id.r
   let sorted := indexed.qsort fun a b => a.2 < b.2
   sorted.map (·.1)
 
+/-- Look up declaration ranges directly from the environment extension. -/
+def findDeclRanges? (env : Environment) (name : Name) : Option DeclarationRanges :=
+  declRangeExt.find? (level := .exported) env name <|>
+    declRangeExt.find? (level := .server) env name
+
 /-- Check whether a declaration needs its body sorry'd.
     Structures, classes, inductives, and abbrevs keep their bodies.
     Theorems, defs, and instances get sorry'd. -/
@@ -80,7 +84,6 @@ def needsSorry (env : Environment) (name : Name) : Bool :=
 /-- Strip the proof body from a declaration's source text, replacing it with `:= sorry`.
     Uses bracket-balanced splitting to find the top-level `:=` or `where`. -/
 def sorryifySource (source : String) : String := Id.run do
-  -- Find the top-level `:=` (not inside brackets)
   let chars := source.toList
   let mut round := 0
   let mut curly := 0
@@ -88,8 +91,6 @@ def sorryifySource (source : String) : String := Id.run do
   let mut i := 0
   let mut foundAssign := false
   let mut assignIdx := 0
-
-  -- Also track `where` at top level
   let mut foundWhere := false
   let mut whereIdx := 0
 
@@ -109,10 +110,8 @@ def sorryifySource (source : String) : String := Id.run do
           assignIdx := i
     | 'w' =>
       if round == 0 && curly == 0 && square == 0 then
-        -- Check for "where" keyword
-        let rest := (source.drop i).take 5
+        let rest := String.mk (chars.drop i |>.take 5)
         if rest == "where" then
-          -- Make sure it's not part of a larger word
           let prevOk := i == 0 || (chars[i-1]!).isWhitespace
           let nextOk := i + 5 >= chars.length || (chars[i+5]!).isWhitespace
           if prevOk && nextOk then
@@ -122,25 +121,22 @@ def sorryifySource (source : String) : String := Id.run do
     i := i + 1
 
   if foundAssign then
-    -- Check if `:=` comes before `where`, or if no `where`
     let useAssign := !foundWhere || assignIdx < whereIdx
     if useAssign then
-      return (source.take assignIdx).trimAsciiRight ++ " := sorry"
+      let head := String.mk (chars.take assignIdx)
+      return head.trimRight ++ " := sorry"
   if foundWhere then
-    return (source.take whereIdx).trimAsciiRight ++ " := sorry"
-
-  -- Fallback: couldn't find assignment, return as-is
+    let head := String.mk (chars.take whereIdx)
+    return head.trimRight ++ " := sorry"
   return source
 
 -- ═══ Phase 3: File assembly ═══
 
 /-- Extract the content of a source file relevant to TFB declarations.
     Reads the file, identifies TFB declaration ranges, extracts context lines
-    before the first TFB declaration, and sorry's proof bodies.
-
-    Returns the processed content for this module, or none if no TFB content. -/
+    before the first TFB declaration, and sorry's proof bodies. -/
 def processModule (env : Environment) (modName : Name) (rootPrefix : Name)
-    (tfbNames : Std.HashSet Name) (declNames : Array Name) : IO (Option String) := do
+    (declNames : Array Name) : IO (Option String) := do
   let sourcePath := modName.toString.replace "." "/" ++ ".lean"
   let source ← IO.FS.readFile sourcePath
   let lines := (source.splitOn "\n").toArray
@@ -148,7 +144,7 @@ def processModule (env : Environment) (modName : Name) (rootPrefix : Name)
   -- Get declaration ranges for TFB names, sorted by start line
   let mut rangeEntries : Array (Name × Nat × Nat) := #[]
   for name in declNames do
-    if let some ranges := (← findDeclarationRanges? name) then
+    if let some ranges := findDeclRanges? env name then
       rangeEntries := rangeEntries.push (name, ranges.range.pos.line, ranges.range.endPos.line)
   rangeEntries := rangeEntries.qsort fun a b => a.2.1 < b.2.1
 
@@ -157,7 +153,7 @@ def processModule (env : Environment) (modName : Name) (rootPrefix : Name)
   let earliestLine := rangeEntries.foldl (fun acc (_, l, _) => min acc l) (lines.size + 1)
 
   -- Build output
-  let shortName := modName.toString.stripPrefix (rootPrefix.toString ++ ".")
+  let shortName := modName.toString.drop (rootPrefix.toString.length + 1)
   let mut out := s!"\n-- ═══ {shortName} ═══\n\n"
 
   -- 1. Context lines: everything before the first TFB declaration that isn't an import/module
@@ -169,18 +165,13 @@ def processModule (env : Environment) (modName : Name) (rootPrefix : Name)
        trimmed.startsWith "meta import " || trimmed.startsWith "public meta import " ||
        (trimmed == "module") then
       continue
-    -- Skip module docstrings (/-! ... -/) — they reference project-specific content
-    -- Keep everything else: namespace, open, variable, section, set_option, universe,
-    -- noncomputable, attributes, comments, blank lines, @[expose]
     out := out ++ line ++ "\n"
 
   -- 2. TFB declarations with sorry injection
   for (name, startLine, endLine) in rangeEntries do
-    -- Extract the declaration source
     let declLines := lines[startLine - 1 : endLine]
     let declSource := "\n".intercalate declLines.toList
 
-    -- Check if we need to sorry the body
     if needsSorry env name then
       out := out ++ sorryifySource declSource ++ "\n\n"
     else
@@ -223,7 +214,7 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   for modName in orderedModules do
     IO.eprintln s!"  Processing {modName}"
     let some declNames := moduleMap[modName]? | continue
-    if let some content ← processModule env modName rootPrefix tfbNames declNames then
+    if let some content ← processModule env modName rootPrefix declNames then
       fileContents := fileContents.push content
 
   -- Phase 4: Assemble final file
