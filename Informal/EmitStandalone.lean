@@ -16,8 +16,9 @@ Given a compiled Lean environment and a target declaration name, generates a
 single standalone `.lean` file containing all transitive type-level dependencies
 (the Trusted Formalization Base) with proofs replaced by `sorry`.
 
-Uses `IO.processCommands` to re-elaborate source files, walking the InfoTree
-to find `declVal` Syntax nodes for precise sorry injection.
+Uses parse-only Syntax trees (no re-elaboration) to locate `declVal` nodes
+for precise sorry injection. Declaration identification uses `DeclarationRanges`
+from the pre-compiled environment.
 -/
 
 public meta section
@@ -60,6 +61,11 @@ def orderModules (env : Environment) (modules : Array Name) : Array Name := Id.r
   let sorted := indexed.qsort fun a b => a.2 < b.2
   sorted.map (·.1)
 
+/-- Look up declaration ranges from the environment extension. -/
+def findDeclRanges? (env : Environment) (name : Name) : Option DeclarationRanges :=
+  declRangeExt.find? (level := .exported) env name <|>
+    declRangeExt.find? (level := .server) env name
+
 /-- Check whether a declaration needs its body sorry'd. -/
 def needsSorry (env : Environment) (name : Name) : Bool :=
   match env.find? name with
@@ -77,8 +83,7 @@ structure Replacement where
   newValue : String
   deriving Inhabited
 
-/-- Find a `declVal` node (declValSimple, declValEqns, whereStructInst) in a
-    Syntax tree using a bounded worklist search.  Returns its source range. -/
+/-- Find a `declVal` node in a Syntax tree using worklist search. -/
 def findDeclVal? (root : Syntax) : Option (String.Pos.Raw × String.Pos.Raw) := Id.run do
   let mut worklist : Array Syntax := #[root]
   while !worklist.isEmpty do
@@ -95,8 +100,7 @@ def findDeclVal? (root : Syntax) : Option (String.Pos.Raw × String.Pos.Raw) := 
       worklist := worklist.push arg
   return none
 
-/-- Check if a Syntax contains a theorem, def, or instance declaration
-    (kinds that should have their bodies sorry'd). -/
+/-- Check if a Syntax contains a sorry-able declaration kind. -/
 def hasSorryableKind (root : Syntax) : Bool := Id.run do
   let mut worklist : Array Syntax := #[root]
   while !worklist.isEmpty do
@@ -123,7 +127,7 @@ def isContextCmd (stx : Syntax) : Bool :=
   k == ``Parser.Command.universe ||
   k == ``Parser.Command.attribute
 
--- ═══ Phase 3: Re-elaborate and classify ═══
+-- ═══ Phase 3: Parse and classify ═══
 
 /-- Describes what to do with a command's source range. -/
 inductive CommandAction where
@@ -132,53 +136,49 @@ inductive CommandAction where
   | skip
   deriving Inhabited
 
-/-- Process a source file by re-elaborating it. Returns classified command actions. -/
-def classifyCommands (env : Environment) (filePath : System.FilePath)
-    (tfbNames : Std.HashSet Name) : IO (Array (String.Pos.Raw × String.Pos.Raw × CommandAction)) := do
-  let source ← IO.FS.readFile filePath
-  let inputCtx := Parser.mkInputContext source filePath.toString
-  let (header, parserState, messages) ← Parser.parseHeader inputCtx
-  let (headerEnv, messages) ← Elab.processHeader header {} messages inputCtx (trustLevel := 1024)
-  let cmdState := Command.mkState headerEnv messages {}
-  let finalState ← IO.processCommands inputCtx parserState cmdState
-  let trees := finalState.commandState.infoState.trees
+/-- Parse a source file (no elaboration) and classify each command.
+    Uses DeclarationRanges from the pre-compiled environment to match
+    parsed commands to TFB declarations. -/
+def classifyCommandsParsed (env : Environment) (filePath : System.FilePath)
+    (tfbNames : Std.HashSet Name)
+    (tfbRangeMap : Std.HashMap String.Pos.Raw Name) : IO (Array (String.Pos.Raw × String.Pos.Raw × CommandAction)) := do
+  -- Parse (no elaboration) — fast, uses env only for token table
+  let moduleSyntax ← Parser.testParseFile env filePath
+  let stx := moduleSyntax.raw
+  -- stx is `Lean.Parser.Module.module` with children [header, commandList]
+  let args := stx.getArgs
+  let header := args[0]!  -- Module.header
+  let cmdList := args[1]! -- nullNode of commands
+
   let mut actions : Array (String.Pos.Raw × String.Pos.Raw × CommandAction) := #[]
 
-  for tree in trees do
-    -- Extract the outermost CommandInfo from each tree
-    let result := tree.foldInfo (init := none) fun ctx info acc =>
-      match acc with
-      | some _ => acc
-      | none =>
-        match info with
-        | .ofCommandInfo ci => some (ci.stx, ctx.env, ctx.cmdEnv?.getD ctx.env)
-        | _ => none
-    let some (stx, envBefore, envAfter) := result | continue
-    let some cmdStart := stx.getPos? | continue
-    let some cmdEnd := stx.getTailPos? | continue
+  -- Skip the header (imports)
+  if let (some hs, some he) := (header.getPos?, header.getTailPos?) then
+    actions := actions.push (hs, he, .skip)
 
-    -- Skip file header
-    if stx.getKind == ``Parser.Module.header then
-      actions := actions.push (cmdStart, cmdEnd, .skip)
-      continue
+  -- Classify each command
+  for cmd in cmdList.getArgs do
+    let some cmdStart := cmd.getPos? | continue
+    let some cmdEnd := cmd.getTailPos? | continue
 
-    -- Keep context commands
-    if isContextCmd stx then
+    -- Is it a context command?
+    if isContextCmd cmd then
       actions := actions.push (cmdStart, cmdEnd, .keep)
       continue
 
-    -- Check if this command declared any TFB names
+    -- Does this command's range overlap with any TFB declaration?
+    -- Check if any TFB declaration starts within this command's byte range
     let mut declaresTFB := false
-    let mut declaredName : Name := .anonymous
-    for name in tfbNames do
-      if envAfter.contains name && !envBefore.contains name then
+    let mut tfbName : Name := .anonymous
+    for (pos, name) in tfbRangeMap do
+      if pos >= cmdStart && pos < cmdEnd then
         declaresTFB := true
-        declaredName := name
+        tfbName := name
         break
 
     if declaresTFB then
-      if needsSorry envAfter declaredName && hasSorryableKind stx then
-        if let some (valStart, valEnd) := findDeclVal? stx then
+      if needsSorry env tfbName && hasSorryableKind cmd then
+        if let some (valStart, valEnd) := findDeclVal? cmd then
           actions := actions.push (cmdStart, cmdEnd,
             .keepWithSorry { startPos := valStart, endPos := valEnd, newValue := " := sorry" })
         else
@@ -191,8 +191,8 @@ def classifyCommands (env : Environment) (filePath : System.FilePath)
   return actions
 
 /-- Apply classified actions to source text. -/
-def applyActions (source : String) (actions : Array (String.Pos.Raw × String.Pos.Raw × CommandAction))
-    : String := Id.run do
+def applyActions (source : String)
+    (actions : Array (String.Pos.Raw × String.Pos.Raw × CommandAction)) : String := Id.run do
   let sorted := actions.qsort fun a b => a.1 < b.1
   let mut result := ""
   for (cmdStart, cmdEnd, action) in sorted do
@@ -209,11 +209,20 @@ def applyActions (source : String) (actions : Array (String.Pos.Raw × String.Po
 
 /-- Process a single module. -/
 def processModule (env : Environment) (modName : Name) (rootPrefix : Name)
-    (tfbNames : Std.HashSet Name) : IO (Option String) := do
+    (tfbNames : Std.HashSet Name) (declNames : Array Name) : IO (Option String) := do
   let sourcePath := modName.toString.replace "." "/" ++ ".lean"
-  IO.eprintln s!"  Re-elaborating {sourcePath}"
-  let actions ← classifyCommands env sourcePath tfbNames
+
+  -- Build a map from source byte position → TFB name for this module
   let source ← IO.FS.readFile sourcePath
+  let fileMap := FileMap.ofString source
+  let mut tfbRangeMap : Std.HashMap String.Pos.Raw Name := {}
+  for name in declNames do
+    if let some ranges := findDeclRanges? env name then
+      let bytePos := fileMap.ofPosition ranges.range.pos
+      tfbRangeMap := tfbRangeMap.insert bytePos name
+
+  IO.eprintln s!"  Parsing {sourcePath} ({declNames.size} TFB decls)"
+  let actions ← classifyCommandsParsed env sourcePath tfbNames tfbRangeMap
   let content := applyActions source actions
   if content.trimAsciiEnd.toString.isEmpty then return none
   let shortName := modName.toString.drop (rootPrefix.toString.length + 1)
@@ -241,7 +250,8 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
 
   let mut fileContents : Array String := #[]
   for modName in orderedModules do
-    let some content ← processModule env modName rootPrefix tfbNames
+    let some declNames := moduleMap[modName]? | continue
+    let some content ← processModule env modName rootPrefix tfbNames declNames
       | continue
     fileContents := fileContents.push content
 
