@@ -102,6 +102,25 @@ def topologicalSort (env : Environment) (names : Std.HashSet Name) : Array Name 
       result := result.push n
   result.reverse
 
+-- ═══ Configuration ═══
+
+/-- How to handle macro-generated declarations in the skeleton. -/
+inductive MacroHandling where
+  /-- Expand: use `ppCommand` on the `MacroExpansionInfo` output to emit
+      the expanded syntax. The reader sees the actual structure/def, not
+      the macro call. -/
+  | expand
+  /-- Include: emit the original macro call and ensure the macro definition
+      is pulled into the dependency walk so the call elaborates. -/
+  | includeMacroDef
+  deriving Inhabited, BEq
+
+/-- Configuration for the TFB skeleton generator. -/
+structure Config where
+  /-- How to handle macro-generated declarations. -/
+  macroHandling : MacroHandling := .expand
+  deriving Inhabited
+
 -- ═══ Phase 3: Per-command extraction ═══
 
 /-- Classification of a command extracted from a source file. -/
@@ -162,11 +181,50 @@ def findDeclRanges? (env : Environment) (name : Name) : Option DeclarationRanges
   declRangeExt.find? (level := .exported) env name <|>
     declRangeExt.find? (level := .server) env name
 
+/-- Check if a Syntax kind is a standard Lean command (not a custom macro). -/
+def isStandardCmdKind (kind : SyntaxNodeKind) : Bool :=
+  kind == ``Parser.Command.declaration ||
+  kind == ``Parser.Module.header ||
+  kind == ``Parser.Command.namespace ||
+  kind == ``Parser.Command.«end» ||
+  kind == ``Parser.Command.open ||
+  kind == ``Parser.Command.variable ||
+  kind == ``Parser.Command.«section» ||
+  kind == ``Parser.Command.set_option ||
+  kind == ``Parser.Command.universe
+
+/-- Find a `MacroExpansionInfo` in an InfoTree whose output is a standard
+    declaration. Returns the expanded Syntax if found. -/
+def findMacroExpansion? (tree : InfoTree) : Option Syntax :=
+  tree.foldInfo (init := none) fun _ctx info acc =>
+    match acc with
+    | some _ => acc
+    | none =>
+      match info with
+      | .ofMacroExpansionInfo mei =>
+        if mei.output.getKind == ``Parser.Command.declaration then
+          some mei.output
+        else none
+      | _ => none
+
+/-- Pretty-print a Syntax as a command string, stripping hygiene markers. -/
+def ppCommandStr (env : Environment) (stx : Syntax) : IO String := do
+  -- Strip macro scopes from all identifiers in the Syntax tree
+  let rec stripScopes : Syntax → Syntax
+    | .ident info rawVal name preresolved =>
+      .ident info rawVal name.eraseMacroScopes preresolved
+    | .node info kind args => .node info kind (args.map stripScopes)
+    | other => other
+  let cleaned := stripScopes stx
+  let (fmt, _) ← (PrettyPrinter.ppCommand ⟨cleaned⟩).toIO
+    { fileName := "<expand>", fileMap := default } { env }
+  return fmt.pretty
+
 /-- Process one source file: re-elaborate against project env, classify each command,
     extract source with sorry injection. Returns structured entries. -/
 def processFile (source : String) (projectEnv : Environment)
     (tfbRangeMap : Std.HashMap String.Pos.Raw Name)
-    (filePath : String) : IO (Array CommandEntry) := do
+    (filePath : String) (cfg : Config := {}) : IO (Array CommandEntry) := do
   let inputCtx := Parser.mkInputContext source filePath
   let (_, parserState, messages) ← Parser.parseHeader inputCtx
   let cmdState := { Command.mkState projectEnv messages {} with infoState.enabled := true }
@@ -197,17 +255,30 @@ def processFile (source : String) (projectEnv : Environment)
         break
     match declaredTFBName with
     | some tfbName =>
+      -- If this command is a macro (non-standard kind) and we're expanding, use the
+      -- expanded syntax from MacroExpansionInfo instead of the original source.
+      let isMacroCmd := topKind != ``Parser.Command.declaration && !isContextCmd stx
+      let mut effectiveSrc := cmdSrc
+      let mut effectiveStx := stx
+      if isMacroCmd && cfg.macroHandling == .expand then
+        if let some expandedStx := findMacroExpansion? tree then
+          effectiveSrc ← ppCommandStr projectEnv expandedStx
+          effectiveStx := expandedStx
       let isThmInEnv := match projectEnv.find? tfbName with
         | some (.thmInfo _) => true
         | _ => false
-      if hasSorryableKind stx || isThmInEnv then
-        if let some (valStart, _) := findDeclVal? stx then
-          let beforeVal := (Substring.Raw.mk source cmdStart valStart).toString
-          entries := entries.push { cls := .tfbDecl true, src := beforeVal ++ " := sorry", kind := topKind }
+      if hasSorryableKind effectiveStx || isThmInEnv then
+        if let some (valStart, _) := findDeclVal? effectiveStx then
+          if isMacroCmd && cfg.macroHandling == .expand then
+            -- For expanded macros, sorry the whole thing
+            entries := entries.push { cls := .tfbDecl true, src := effectiveSrc, kind := topKind }
+          else
+            let beforeVal := (Substring.Raw.mk source cmdStart valStart).toString
+            entries := entries.push { cls := .tfbDecl true, src := beforeVal ++ " := sorry", kind := topKind }
         else
-          entries := entries.push { cls := .tfbDecl true, src := cmdSrc, kind := topKind }
+          entries := entries.push { cls := .tfbDecl true, src := effectiveSrc, kind := topKind }
       else
-        entries := entries.push { cls := .tfbDecl false, src := cmdSrc, kind := topKind }
+        entries := entries.push { cls := .tfbDecl false, src := effectiveSrc, kind := topKind }
     | none =>
       if isContextCmd stx then
         entries := entries.push { cls := .context, src := cmdSrc, kind := topKind }
@@ -238,7 +309,8 @@ def coreContextSignature (entries : Array CommandEntry) : Array SyntaxNodeKind :
 
 def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     (outputPath : System.FilePath)
-    (excludePrefixes : Array Name := #[]) : IO Unit := do
+    (excludePrefixes : Array Name := #[])
+    (cfg : Config := {}) : IO Unit := do
   -- Phase 1: Determine target module and its imports.
   -- Import the target module's direct imports — these transitively cover all
   -- dependencies. Only declarations from the target's own module (or other
@@ -296,7 +368,7 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
             let bytePos := fileMap.ofPosition ranges.range.pos
             tfbRangeMap := tfbRangeMap.insert bytePos name
     IO.eprintln s!"  {filePath} ({tfbRangeMap.size} TFB decls)"
-    let entries ← processFile source env tfbRangeMap filePath
+    let entries ← processFile source env tfbRangeMap filePath cfg
     allModules := allModules.push { modName, entries }
 
   -- Phase 4: Assemble from structured entries
