@@ -339,8 +339,8 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
         output := output ++ e.src ++ "\n"
         prevWasDecl := false
       | .tfbDecl _ =>
-        -- Add blank line before each declaration (between decls or after context block)
-        if prevWasDecl then output := output ++ "\n"
+        -- Add blank line before each declaration
+        output := output ++ "\n"
         output := output ++ e.src ++ "\n"
         prevWasDecl := true
       | .skip => pure ()
