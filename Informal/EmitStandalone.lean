@@ -159,9 +159,9 @@ def processFile (filePath : System.FilePath) (tfbNames : Std.HashSet Name)
   IO.eprintln s!"  Re-elaborating {filePath}"
   let input ← IO.FS.readFile filePath
   let inputCtx := Parser.mkInputContext input filePath.toString
-  let (header, parserState, messages) ← Parser.parseHeader inputCtx
-  let (env, messages) ← Elab.processHeader header {} messages inputCtx (trustLevel := 1024)
-  let cmdState := { Command.mkState env messages {} with infoState.enabled := true }
+  -- Parse header to advance past imports, but reuse the project's already-loaded env
+  let (_, parserState, messages) ← Parser.parseHeader inputCtx
+  let cmdState := { Command.mkState projectEnv messages {} with infoState.enabled := true }
   let finalState ← IO.processCommands inputCtx parserState cmdState
   -- Get all commands (except EOI) and all InfoTrees
   let commands := finalState.commands.pop  -- Remove terminal EOI
