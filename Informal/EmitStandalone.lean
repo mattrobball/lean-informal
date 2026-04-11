@@ -216,17 +216,18 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     | .error msg => throw (IO.userError msg)
   IO.eprintln s!"TFB: {tfbNames.size} declarations"
   let sorted := topologicalSort env tfbNames
-  -- Module order from topologically sorted declarations
-  let mut seenModules : Array Name := #[]
+  -- Module order: use module index from env.header.moduleNames (= import DAG order)
   let mut moduleSet : Std.HashSet Name := {}
-  for name in sorted do
-    match env.getModuleIdxFor? name with
-    | some idx =>
-      let modName := env.header.moduleNames[idx.toNat]!
-      if !moduleSet.contains modName then
-        seenModules := seenModules.push modName
-        moduleSet := moduleSet.insert modName
-    | none => pure ()
+  for name in tfbNames do
+    if let some idx := env.getModuleIdxFor? name then
+      moduleSet := moduleSet.insert env.header.moduleNames[idx.toNat]!
+  -- Sort modules by their index in the environment (= import DAG topological order)
+  let mut modIdxPairs : Array (Name × Nat) := #[]
+  for i in [:env.header.moduleNames.size] do
+    let modName := env.header.moduleNames[i]!
+    if moduleSet.contains modName then
+      modIdxPairs := modIdxPairs.push (modName, i)
+  let seenModules := (modIdxPairs.qsort fun a b => a.2 < b.2).map (·.1)
   IO.eprintln s!"TFB spans {seenModules.size} modules"
   -- Build range map: source byte position → TFB name (for matching commands to decls)
   let mut tfbRangeMap : Std.HashMap String.Pos.Raw Name := {}
@@ -255,7 +256,16 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   output := output ++ "-/\n"
   for content in fileContents do
     output := output ++ content
-  IO.FS.writeFile outputPath output
+  -- Strip @[informal ...] attributes (not available without importing Informal)
+  -- Also strip @[expose] (project-specific)
+  let mut cleaned := output
+  -- Remove lines that are just @[informal ...] or @[expose] attributes
+  let lines := cleaned.splitOn "\n"
+  let filtered := lines.filter fun line =>
+    let t := line.trimAsciiStart.toString
+    !(t.startsWith "@[informal " || t.startsWith "@[expose]")
+  cleaned := "\n".intercalate filtered
+  IO.FS.writeFile outputPath cleaned
   IO.eprintln s!"Wrote {outputPath}"
 
 end Informal.EmitStandalone
