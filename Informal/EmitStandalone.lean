@@ -16,9 +16,9 @@ Given a compiled Lean environment and a target declaration name, generates a
 single standalone `.lean` file containing all transitive type-level dependencies
 (the Trusted Formalization Base) with proofs replaced by `sorry`.
 
-Uses parse-only Syntax trees (no re-elaboration) to locate `declVal` nodes
-for precise sorry injection. Declaration identification uses `DeclarationRanges`
-from the pre-compiled environment.
+Uses Lean's PrettyPrinter (`ppSignature`, `ppExpr`) to emit declarations from
+the compiled environment — no source parsing needed. Declarations are ordered
+by Kahn's topological sort using `usedConstants` for dependency edges.
 -/
 
 public meta section
@@ -50,218 +50,140 @@ def computeTFBNames (env : Environment) (rootPrefix : Name) (targetName : Name)
     | none => pure ()
   return result
 
--- ═══ Phase 2: Helpers ═══
+-- ═══ Phase 2: Topological sort (Kahn's algorithm) ═══
 
-/-- Order modules by the import DAG (dependencies first). -/
-def orderModules (env : Environment) (modules : Array Name) : Array Name := Id.run do
-  let mut modIdxMap : Std.HashMap Name Nat := {}
-  for i in [:env.header.moduleNames.size] do
-    modIdxMap := modIdxMap.insert env.header.moduleNames[i]! i
-  let indexed := modules.filterMap fun m => (modIdxMap[m]?).map (m, ·)
-  let sorted := indexed.qsort fun a b => a.2 < b.2
-  sorted.map (·.1)
+/-- Compute direct dependencies of a declaration within a given set.
+    Uses `usedConstants` (proof-irrelevant) and intersects with `relevantNames`. -/
+def directDepsInSet (env : Environment) (name : Name) (relevantNames : Std.HashSet Name)
+    : Array Name := Id.run do
+  let some ci := env.find? name | return #[]
+  let used := usedConstants ci (proofIrrelevant := true)
+  let mut deps : Array Name := #[]
+  for u in used.toArray do
+    let resolved := resolveToUser env u
+    if relevantNames.contains resolved && resolved != name then
+      deps := deps.push resolved
+  -- Deduplicate
+  let deduped := deps.toList.eraseDups.toArray
+  deduped
 
-/-- Look up declaration ranges from the environment extension. -/
-def findDeclRanges? (env : Environment) (name : Name) : Option DeclarationRanges :=
-  declRangeExt.find? (level := .exported) env name <|>
-    declRangeExt.find? (level := .server) env name
+/-- Topological sort of a set of declaration names using Kahn's algorithm.
+    Returns names in dependency order (dependencies first). -/
+def topologicalSort (env : Environment) (names : Std.HashSet Name) : Array Name := Id.run do
+  -- Build adjacency lists and in-degree counts
+  let nameArray := names.toArray
+  let mut deps : Std.HashMap Name (Array Name) := {}
+  let mut inDegree : Std.HashMap Name Nat := {}
+  for n in nameArray do
+    inDegree := inDegree.insert n 0
+  for n in nameArray do
+    let d := directDepsInSet env n names
+    deps := deps.insert n d
+    for dep in d do
+      inDegree := inDegree.insert dep ((inDegree.getD dep 0) + 1)
+  -- Kahn's algorithm
+  let mut queue : Array Name := #[]
+  for n in nameArray do
+    if (inDegree.getD n 0) == 0 then
+      queue := queue.push n
+  let mut result : Array Name := #[]
+  while !queue.isEmpty do
+    let n := queue.back!
+    queue := queue.pop
+    result := result.push n
+    for dep in (deps.getD n #[]) do
+      let newDeg := (inDegree.getD dep 1) - 1
+      inDegree := inDegree.insert dep newDeg
+      if newDeg == 0 then
+        queue := queue.push dep
+  -- Append any remaining (cycles) at the end
+  for n in nameArray do
+    if !result.contains n then
+      result := result.push n
+  -- Reverse: Kahn's gives dependents-first, we want dependencies-first
+  result.reverse
 
-/-- Check whether a declaration needs its body sorry'd. -/
-def needsSorry (env : Environment) (name : Name) : Bool :=
-  match env.find? name with
-  | some (.thmInfo _) => true
-  | some (.defnInfo _) =>
-    if (Lean.getReducibilityStatusCore env name) == .reducible then false
-    else true
-  | some (.opaqueInfo _) => false
-  | _ => false
+-- ═══ Phase 3: Declaration emission ═══
 
-/-- A source replacement entry. -/
-structure Replacement where
-  startPos : String.Pos.Raw
-  endPos : String.Pos.Raw
-  newValue : String
-  deriving Inhabited
-
-/-- Find a `declVal` node in a Syntax tree using worklist search. -/
-def findDeclVal? (root : Syntax) : Option (String.Pos.Raw × String.Pos.Raw) := Id.run do
-  let mut worklist : Array Syntax := #[root]
-  while !worklist.isEmpty do
-    let stx := worklist.back!
-    worklist := worklist.pop
-    let k := stx.getKind
-    if k == ``Parser.Command.declValSimple ||
-       k == ``Parser.Command.declValEqns ||
-       k == ``Parser.Command.whereStructInst then
-      match stx.getPos?, stx.getTailPos? with
-      | some s, some e => return some (s, e)
-      | _, _ => pure ()
-    for arg in stx.getArgs do
-      worklist := worklist.push arg
-  return none
-
-/-- Check if a Syntax contains a sorry-able declaration kind. -/
-def hasSorryableKind (root : Syntax) : Bool := Id.run do
-  let mut worklist : Array Syntax := #[root]
-  while !worklist.isEmpty do
-    let stx := worklist.back!
-    worklist := worklist.pop
-    let k := stx.getKind
-    if k == ``Parser.Command.theorem ||
-       k == ``Parser.Command.definition ||
-       k == ``Parser.Command.instance then
-      return true
-    for arg in stx.getArgs do
-      worklist := worklist.push arg
-  return false
-
-/-- Check if a Syntax is a context-setting command. -/
-def isContextCmd (stx : Syntax) : Bool :=
-  let k := stx.getKind
-  k == ``Parser.Command.namespace ||
-  k == ``Parser.Command.«end» ||
-  k == ``Parser.Command.open ||
-  k == ``Parser.Command.variable ||
-  k == ``Parser.Command.«section» ||
-  k == ``Parser.Command.set_option ||
-  k == ``Parser.Command.universe ||
-  k == ``Parser.Command.attribute
-
--- ═══ Phase 3: Parse and classify ═══
-
-/-- Describes what to do with a command's source range. -/
-inductive CommandAction where
-  | keep
-  | keepWithSorry (r : Replacement)
-  | skip
-  deriving Inhabited
-
-/-- Parse a source file (no elaboration) and classify each command.
-    Uses DeclarationRanges from the pre-compiled environment to match
-    parsed commands to TFB declarations. -/
-def classifyCommandsParsed (env : Environment) (fullEnv : Environment) (filePath : System.FilePath)
-    (tfbRangeMap : Std.HashMap String.Pos.Raw Name) : IO (Array (String.Pos.Raw × String.Pos.Raw × CommandAction)) := do
-  -- Parse (no elaboration) — fast, uses fullEnv for token/notation tables
-  let moduleSyntax ← Parser.testParseFile fullEnv filePath
-  let stx := moduleSyntax.raw
-  -- stx is `Lean.Parser.Module.module` with children [header, commandList]
-  let args := stx.getArgs
-  let header := args[0]!  -- Module.header
-  let cmdList := args[1]! -- nullNode of commands
-
-  let mut actions : Array (String.Pos.Raw × String.Pos.Raw × CommandAction) := #[]
-
-  -- Skip the header (imports)
-  if let (some hs, some he) := (header.getPos?, header.getTailPos?) then
-    actions := actions.push (hs, he, .skip)
-
-  -- Classify each command
-  for cmd in cmdList.getArgs do
-    let some cmdStart := cmd.getPos? | continue
-    let some cmdEnd := cmd.getTailPos? | continue
-
-    -- Is it a context command?
-    if isContextCmd cmd then
-      actions := actions.push (cmdStart, cmdEnd, .keep)
-      continue
-
-    -- Does this command's range overlap with any TFB declaration?
-    -- Check if any TFB declaration starts within this command's byte range
-    let mut declaresTFB := false
-    let mut tfbName : Name := .anonymous
-    for (pos, name) in tfbRangeMap do
-      if pos >= cmdStart && pos < cmdEnd then
-        declaresTFB := true
-        tfbName := name
-        break
-
-    if declaresTFB then
-      if needsSorry env tfbName && hasSorryableKind cmd then
-        if let some (valStart, valEnd) := findDeclVal? cmd then
-          actions := actions.push (cmdStart, cmdEnd,
-            .keepWithSorry { startPos := valStart, endPos := valEnd, newValue := " := sorry" })
-        else
-          actions := actions.push (cmdStart, cmdEnd, .keep)
-      else
-        actions := actions.push (cmdStart, cmdEnd, .keep)
-    else
-      actions := actions.push (cmdStart, cmdEnd, .skip)
-
-  return actions
-
-/-- Apply classified actions to source text. -/
-def applyActions (source : String)
-    (actions : Array (String.Pos.Raw × String.Pos.Raw × CommandAction)) : String := Id.run do
-  let sorted := actions.qsort fun a b => a.1 < b.1
+/-- Pretty-print a declaration as a standalone Lean statement using the environment.
+    Structures/classes/inductives get their full definition.
+    Theorems/defs/instances get `sorry` as body. -/
+def ppDecl (env : Environment) (name : Name) : MetaM String := do
+  let some ci := env.find? name | return s!"-- {name}: not found"
+  let doc ← findDocString? env name
   let mut result := ""
-  for (cmdStart, cmdEnd, action) in sorted do
-    match action with
-    | .skip => pure ()
-    | .keep =>
-      result := result ++ (Substring.Raw.mk source cmdStart cmdEnd).toString ++ "\n"
-    | .keepWithSorry r =>
-      result := result ++ (Substring.Raw.mk source cmdStart r.startPos).toString
-      result := result ++ r.newValue ++ "\n"
-  result
-
--- ═══ Phase 4: Assembly ═══
-
-/-- Process a single module. -/
-def processModule (env : Environment) (fullEnv : Environment) (modName : Name)
-    (rootPrefix : Name) (declNames : Array Name) : IO (Option String) := do
-  let sourcePath := modName.toString.replace "." "/" ++ ".lean"
-
-  -- Build a map from source byte position → TFB name for this module
-  let source ← IO.FS.readFile sourcePath
-  let fileMap := FileMap.ofString source
-  let mut tfbRangeMap : Std.HashMap String.Pos.Raw Name := {}
-  for name in declNames do
-    if let some ranges := findDeclRanges? env name then
-      let bytePos := fileMap.ofPosition ranges.range.pos
-      tfbRangeMap := tfbRangeMap.insert bytePos name
-
-  IO.eprintln s!"  Parsing {sourcePath} ({declNames.size} TFB decls)"
-  let actions ← classifyCommandsParsed env fullEnv sourcePath tfbRangeMap
-  let content := applyActions source actions
-  if content.trimAsciiEnd.toString.isEmpty then return none
-  let shortName := modName.toString.drop (rootPrefix.toString.length + 1)
-  return some (s!"\n-- ═══ {shortName} ═══\n" ++ content)
+  -- Docstring
+  if let some d := doc then
+    result := result ++ s!"/-- {d} -/\n"
+  match ci with
+  | .inductInfo iv =>
+    -- Inductive type (including structures/classes)
+    if isStructure env name then
+      -- Use #print-style output for structures
+      let sig : FormatWithInfos ← PrettyPrinter.ppSignature name
+      result := result ++ s!"-- structure {name} (use #print for full definition)\n"
+      result := result ++ s!"-- {sig.fmt}\n"
+    else
+      let sig : FormatWithInfos ← PrettyPrinter.ppSignature name
+      result := result ++ s!"-- inductive {name}\n"
+      result := result ++ s!"-- {sig.fmt}\n"
+  | .thmInfo tv =>
+    let sig : FormatWithInfos ← PrettyPrinter.ppSignature name
+    result := result ++ s!"theorem {sig.fmt} := sorry"
+  | .defnInfo dv =>
+    let isAbbrev := (Lean.getReducibilityStatusCore env name) == .reducible
+    let sig : FormatWithInfos ← PrettyPrinter.ppSignature name
+    if isAbbrev then
+      result := result ++ s!"abbrev {sig.fmt} := sorry"
+    else
+      result := result ++ s!"noncomputable def {sig.fmt} := sorry"
+  | .axiomInfo _ =>
+    let sig : FormatWithInfos ← PrettyPrinter.ppSignature name
+    result := result ++ s!"axiom {sig.fmt}"
+  | .opaqueInfo _ =>
+    let sig : FormatWithInfos ← PrettyPrinter.ppSignature name
+    result := result ++ s!"opaque {sig.fmt}"
+  | _ =>
+    result := result ++ s!"-- {name}: unsupported declaration kind"
+  return result
 
 /-- Main entry point: generate a standalone TFB file. -/
 def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     (outputPath : System.FilePath)
     (excludePrefixes : Array Name := #[]) : IO Unit := do
+  -- Phase 1: Compute TFB names
   let tfbNames ← match computeTFBNames env rootPrefix targetName excludePrefixes with
     | .ok names => pure names
     | .error msg => throw (IO.userError msg)
   IO.eprintln s!"TFB: {tfbNames.size} declarations"
 
-  let mut moduleMap : Std.HashMap Name (Array Name) := {}
-  for name in tfbNames do
-    match env.getModuleIdxFor? name with
-    | some idx =>
-      let modName := env.header.moduleNames[idx.toNat]!
-      moduleMap := moduleMap.insert modName
-        ((moduleMap.getD modName #[]).push name)
-    | none => IO.eprintln s!"  Warning: no module for {name}"
-  let orderedModules := orderModules env (moduleMap.toArray.map (·.1))
-  IO.eprintln s!"TFB spans {orderedModules.size} modules"
+  -- Phase 2: Topological sort
+  let sorted := topologicalSort env tfbNames
+  IO.eprintln s!"Sorted {sorted.size} declarations"
 
-  let mut fileContents : Array String := #[]
-  for modName in orderedModules do
-    let some declNames := moduleMap[modName]? | continue
-    let some content ← processModule env env modName rootPrefix declNames
-      | continue
-    fileContents := fileContents.push content
+  -- Phase 3: Emit each declaration
+  let ctx : Core.Context := { fileName := "<emit>", fileMap := default }
+  let state : Core.State := { env }
+  let (declStrings, _) ← (do
+    let mut results : Array String := #[]
+    for name in sorted do
+      let s ← (ppDecl env name).run'
+      results := results.push s
+    return results : CoreM _).toIO ctx state
 
+  -- Phase 4: Assemble file
   let mut output := ""
   output := output ++ "import Mathlib\n\n"
   output := output ++ "/-! # Trusted Formalization Base\n"
   output := output ++ s!"{rootPrefix} — `{targetName}`\n"
-  output := output ++ "Auto-generated — all proofs replaced with `sorry`.\n"
-  output := output ++ "-/\n"
-  for content in fileContents do
-    output := output ++ content
+  output := output ++ s!"Auto-generated — all proofs replaced with `sorry`.\n"
+  output := output ++ s!"{tfbNames.size} declarations in dependency order.\n"
+  output := output ++ "-/\n\n"
+  output := output ++ "set_option autoImplicit false\n\n"
+  output := output ++ s!"namespace {rootPrefix}\n\n"
+  for s in declStrings do
+    output := output ++ s ++ "\n\n"
+  output := output ++ s!"end {rootPrefix}\n"
   IO.FS.writeFile outputPath output
   IO.eprintln s!"Wrote {outputPath}"
 
