@@ -347,7 +347,9 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     | some idx =>
       let imports := env.header.moduleData[idx.toNat]!.imports.map Import.module
       for imp in imports do
-        if imp != `Init && !rootPrefix.isPrefixOf imp && !emittedImports.contains imp then
+        if imp != `Init && !rootPrefix.isPrefixOf imp
+          && !((`Informal).isPrefixOf imp) && !((`ProblemExtraction).isPrefixOf imp)
+          && !emittedImports.contains imp then
           emittedImports := emittedImports.insert imp
           output := output ++ s!"import {imp}\n"
     | none => pure ()
@@ -356,7 +358,9 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   | some idx =>
     let imports := env.header.moduleData[idx.toNat]!.imports.map Import.module
     for imp in imports do
-      if imp != `Init && !rootPrefix.isPrefixOf imp && !emittedImports.contains imp then
+      if imp != `Init && !rootPrefix.isPrefixOf imp
+          && !((`Informal).isPrefixOf imp) && !((`ProblemExtraction).isPrefixOf imp)
+          && !emittedImports.contains imp then
         emittedImports := emittedImports.insert imp
         output := output ++ s!"import {imp}\n"
   | none => pure ()
