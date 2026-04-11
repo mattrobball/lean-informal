@@ -20,7 +20,12 @@ unsafe def main (args : List String) : IO Unit := do
     enableInitializersExecution
     let rootName := root.toName
     let targetName := target.toName
-    -- Import the project module
+    -- Import the project module.
+    -- `loadExts := true` is critical: without it, parser extensions (notation like +, ⋙,
+    -- scoped syntax, etc.) are not loaded, causing `IO.processCommands` to produce
+    -- truncated Syntax trees with wrong `getTailPos?` positions.
+    -- Discovered via Test/ExeVsElab.lean: the elab command path gets extensions
+    -- automatically from `import`, but `importModules` defaults to `loadExts := false`.
     let env ← importModules (loadExts := true) #[{ module := rootName }] {} (trustLevel := 1024)
     emitStandalone env rootName targetName output
   | _ =>

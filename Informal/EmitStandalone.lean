@@ -19,6 +19,9 @@ single standalone `.lean` file containing all transitive type-level dependencies
 Uses InfoTree re-elaboration (reusing the project env) to get per-command
 Syntax. Matches commands to TFB declarations via DeclarationRanges byte
 positions. Surgical `declVal` replacement for sorry injection.
+
+Each command is classified by its Syntax kind and carried as a structured
+`CommandEntry` through to the assembly phase — no string re-parsing needed.
 -/
 
 public meta section
@@ -91,7 +94,23 @@ def topologicalSort (env : Environment) (names : Std.HashSet Name) : Array Name 
       result := result.push n
   result.reverse
 
--- ═══ Phase 3: Per-command extraction (tested in Test/ExtractTest.lean) ═══
+-- ═══ Phase 3: Per-command extraction ═══
+
+/-- Classification of a command extracted from a source file. -/
+inductive CmdClass where
+  | tfbDecl (isSorried : Bool)   -- TFB declaration; `isSorried` = proof body replaced
+  | context                      -- namespace/end/open/variable/section/set_option/universe
+  | skip                         -- non-TFB declaration or other command
+  deriving Inhabited, BEq
+
+/-- A classified command with its source text.
+    The Syntax kind is preserved so Phase 4 can distinguish namespace/open/variable/etc.
+    without re-parsing the source string. -/
+structure CommandEntry where
+  cls : CmdClass
+  src : String               -- source text (with sorry injection if applicable)
+  kind : SyntaxNodeKind      -- the Syntax kind from the InfoTree
+  deriving Inhabited
 
 def findDeclVal? (root : Syntax) : Option (String.Pos.Raw × String.Pos.Raw) := Id.run do
   let mut worklist : Array Syntax := #[root]
@@ -115,8 +134,6 @@ def hasSorryableKind (root : Syntax) : Bool := Id.run do
     let stx := worklist.back!
     worklist := worklist.pop
     let k := stx.getKind
-    -- Only sorry theorems/lemmas. Everything else (defs, instances, abbrevs)
-    -- keeps its body because type checking depends on definitional reduction.
     if k == ``Parser.Command.theorem then
       return true
     for arg in stx.getArgs do
@@ -137,17 +154,17 @@ def findDeclRanges? (env : Environment) (name : Name) : Option DeclarationRanges
   declRangeExt.find? (level := .exported) env name <|>
     declRangeExt.find? (level := .server) env name
 
-/-- Process one source file: re-elaborate against project env, extract TFB
-    declarations with sorry injection, keep minimal context commands. -/
+/-- Process one source file: re-elaborate against project env, classify each command,
+    extract source with sorry injection. Returns structured entries. -/
 def processFile (source : String) (projectEnv : Environment)
     (tfbRangeMap : Std.HashMap String.Pos.Raw Name)
-    (filePath : String) : IO String := do
+    (filePath : String) : IO (Array CommandEntry) := do
   let inputCtx := Parser.mkInputContext source filePath
   let (_, parserState, messages) ← Parser.parseHeader inputCtx
   let cmdState := { Command.mkState projectEnv messages {} with infoState.enabled := true }
   let finalState ← IO.processCommands inputCtx parserState cmdState
   let trees := finalState.commandState.infoState.trees.toArray
-  let mut output := ""
+  let mut entries : Array CommandEntry := #[]
   for i in [:trees.size] do
     let tree := trees[i]!
     let cmdResult := tree.foldInfo (init := none) fun _ctx info acc =>
@@ -161,7 +178,9 @@ def processFile (source : String) (projectEnv : Environment)
     let some cmdStart := stx.getPos? | continue
     let some cmdEnd := stx.getTailPos? | continue
     let cmdSrc := (Substring.Raw.mk source cmdStart cmdEnd).toString
-    if stx.getKind == ``Parser.Module.header then continue
+    let topKind := stx.getKind
+    -- Skip header
+    if topKind == ``Parser.Module.header then continue
     -- Match to TFB by byte position
     let mut declaredTFBName : Option Name := none
     for (pos, name) in tfbRangeMap do
@@ -170,26 +189,44 @@ def processFile (source : String) (projectEnv : Environment)
         break
     match declaredTFBName with
     | some tfbName =>
-      -- Sorry theorems (incl Prop-valued instances, which are thmInfo in the env).
-      -- Data-valued defs/instances keep their bodies for type unification.
       let isThmInEnv := match projectEnv.find? tfbName with
         | some (.thmInfo _) => true
         | _ => false
       if hasSorryableKind stx || isThmInEnv then
         if let some (valStart, _) := findDeclVal? stx then
           let beforeVal := (Substring.Raw.mk source cmdStart valStart).toString
-          output := output ++ beforeVal ++ " := sorry\n"
+          entries := entries.push { cls := .tfbDecl true, src := beforeVal ++ " := sorry", kind := topKind }
         else
-          output := output ++ cmdSrc ++ "\n"
+          entries := entries.push { cls := .tfbDecl true, src := cmdSrc, kind := topKind }
       else
-        -- Structure/class/inductive/abbrev: keep verbatim
-        output := output ++ cmdSrc ++ "\n"
+        entries := entries.push { cls := .tfbDecl false, src := cmdSrc, kind := topKind }
     | none =>
       if isContextCmd stx then
-        output := output ++ cmdSrc ++ "\n"
-  return output
+        entries := entries.push { cls := .context, src := cmdSrc, kind := topKind }
+      else
+        entries := entries.push { cls := .skip, src := cmdSrc, kind := topKind }
+  return entries
 
 -- ═══ Phase 4: Assembly ═══
+
+/-- A module's classified content for assembly. -/
+structure ModuleContent where
+  modName : Name
+  entries : Array CommandEntry
+  deriving Inhabited
+
+/-- Extract the "context signature" from a module's entries: the sequence of
+    namespace/open/noncomputableSection commands (not variable/end/section). -/
+def coreContextSignature (entries : Array CommandEntry) : Array SyntaxNodeKind := Id.run do
+  let mut sig : Array SyntaxNodeKind := #[]
+  for e in entries do
+    match e.cls with
+    | .context =>
+      if e.kind == ``Parser.Command.namespace ||
+         e.kind == ``Parser.Command.open then
+        sig := sig.push e.kind
+    | _ => pure ()
+  sig
 
 def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     (outputPath : System.FilePath)
@@ -200,7 +237,10 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     | .error msg => throw (IO.userError msg)
   IO.eprintln s!"TFB: {tfbNames.size} declarations"
 
-  -- Phase 2: Module order from env.header.moduleNames (= import DAG order)
+  -- Phase 2: Module order from env.header.moduleNames (= import DAG order).
+  -- Verified in Lean/Environment.lean:2120-2123: `importModulesCore` calls `goRec mod`
+  -- (which recursively imports dependencies) BEFORE pushing the module name to
+  -- `moduleNames`. So the array is in dependency-first topological order.
   let mut moduleSet : Std.HashSet Name := {}
   for name in tfbNames do
     if let some idx := env.getModuleIdxFor? name then
@@ -214,12 +254,11 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   IO.eprintln s!"TFB spans {orderedModules.size} modules"
 
   -- Phase 3: Build tfbRangeMap per module and process each file
-  let mut allContent : Array (Name × String) := #[]
+  let mut allModules : Array ModuleContent := #[]
   for modName in orderedModules do
     let filePath := modName.toString.replace "." "/" ++ ".lean"
     let source ← IO.FS.readFile filePath
     let fileMap := FileMap.ofString source
-    -- Build range map for TFB names in this module
     let mut tfbRangeMap : Std.HashMap String.Pos.Raw Name := {}
     for name in tfbNames do
       if let some idx := env.getModuleIdxFor? name then
@@ -228,60 +267,34 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
             let bytePos := fileMap.ofPosition ranges.range.pos
             tfbRangeMap := tfbRangeMap.insert bytePos name
     IO.eprintln s!"  {filePath} ({tfbRangeMap.size} TFB decls)"
-    let content ← processFile source env tfbRangeMap filePath
-    if !content.trimAsciiEnd.toString.isEmpty then
-      allContent := allContent.push (modName, content)
+    let entries ← processFile source env tfbRangeMap filePath
+    allModules := allModules.push { modName, entries }
 
-  -- Phase 4: Assemble with consolidated header and merged contexts
-  -- Classify each line as context vs content
-  let isContextLine (t : String) : Bool :=
-    t.startsWith "noncomputable section" ||
-    t.startsWith "open " ||
-    t.startsWith "namespace " ||
-    t.startsWith "variable " ||
-    t.startsWith "attribute " ||
-    t.startsWith "end "
-  let isStrippable (t : String) (hoistedOpts : Array String) : Bool :=
-    t.startsWith "universe " ||
-    t.startsWith "@[informal " ||
-    t.startsWith "@[expose]" ||
-    hoistedOpts.contains t
-  -- Collect universes, find universal set_options
+  -- Phase 4: Assemble from structured entries
+  -- Collect universes and set_options from context commands (using Syntax kind, not string parsing)
   let mut universeNames : Array String := #[]
-  let mut setOptionCounts : Std.HashMap String Nat := {}
-  let numSections := allContent.size
-  for (_, content) in allContent do
-    let mut seenInFile : Std.HashSet String := {}
-    for line in content.splitOn "\n" do
-      let t := line.trimAsciiStart.toString
-      if t.startsWith "universe " then
-        for name in (t.drop 9).toString.splitOn " " do
-          let name := name.trimAsciiEnd.toString
-          if !name.isEmpty && !universeNames.contains name then
-            universeNames := universeNames.push name
-      if t.startsWith "set_option " && !seenInFile.contains t then
-        seenInFile := seenInFile.insert t
-        setOptionCounts := setOptionCounts.insert t ((setOptionCounts.getD t 0) + 1)
+  let mut setOptionSrcs : Std.HashMap String Nat := {}  -- src → count of modules containing it
+  for mc in allModules do
+    let mut seenInModule : Std.HashSet String := {}
+    for e in mc.entries do
+      match e.cls with
+      | .context =>
+        if e.kind == ``Parser.Command.universe then
+          -- Extract universe names from the source (this is the one place we read the string,
+          -- but the command was identified by Syntax kind, not string matching)
+          for word in e.src.splitOn " " do
+            let w := word.trimAsciiEnd.toString
+            if w != "universe" && !w.isEmpty && !universeNames.contains w then
+              universeNames := universeNames.push w
+        if e.kind == ``Parser.Command.set_option && !seenInModule.contains e.src then
+          seenInModule := seenInModule.insert e.src
+          setOptionSrcs := setOptionSrcs.insert e.src ((setOptionSrcs.getD e.src 0) + 1)
+      | _ => pure ()
+  let numModules := allModules.size
   let mut hoistedOpts : Array String := #[]
-  for (opt, count) in setOptionCounts do
-    if count == numSections then hoistedOpts := hoistedOpts.push opt
-  -- Extract context signature per section for merging
-  -- A context signature = the set of context lines (noncomputable, open, namespace, variable)
-  let extractContext (content : String) : Array String := Id.run do
-    let mut ctx : Array String := #[]
-    for line in content.splitOn "\n" do
-      let t := line.trimAsciiStart.toString
-      if isContextLine t && !isStrippable t hoistedOpts then
-        ctx := ctx.push line
-    ctx
-  -- Extract non-context, non-strippable content lines
-  let extractDecls (content : String) : Array String := Id.run do
-    let mut decls : Array String := #[]
-    for line in content.splitOn "\n" do
-      let t := line.trimAsciiStart.toString
-      if !isContextLine t && !isStrippable t hoistedOpts && !t.isEmpty then
-        decls := decls.push line
-    decls
+  for (src, count) in setOptionSrcs do
+    if count == numModules then hoistedOpts := hoistedOpts.push src
+
   -- Emit header
   let mut output := "import Mathlib\n\n"
   output := output ++ "/-! # Trusted Formalization Base\n"
@@ -295,60 +308,85 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   output := output ++ "\n"
   unless universeNames.isEmpty do
     output := output ++ "universe " ++ " ".intercalate universeNames.toList ++ "\n\n"
-  -- Emit sections, merging consecutive ones with identical context
-  let mut prevContext : Array String := #[]
-  let mut emittedVars : Std.HashSet String := {}
-  for (modName, content) in allContent do
-    let shortName := modName.toString.drop (rootPrefix.toString.length + 1)
-    let ctx := extractContext content
-    let decls := extractDecls content
-    if decls.isEmpty then continue
-    -- Check if context matches previous (can merge)
-    -- Extract just namespace/noncomputable/open lines (not variable/end)
-    let coreCtx := ctx.filter fun line =>
-      let t := line.trimAsciiStart.toString
-      t.startsWith "noncomputable section" || t.startsWith "open " || t.startsWith "namespace "
-    let prevCoreCtx := prevContext.filter fun line =>
-      let t := line.trimAsciiStart.toString
-      t.startsWith "noncomputable section" || t.startsWith "open " || t.startsWith "namespace "
-    if coreCtx == prevCoreCtx && !prevContext.isEmpty then
-      -- Same context — just emit section header comment and declarations
-      output := output ++ s!"\n-- ─── {shortName} ───\n"
-      -- Emit any new variables not yet in scope
-      for line in ctx do
-        let t := line.trimAsciiStart.toString
-        if t.startsWith "variable" && !emittedVars.contains t then
-          output := output ++ line ++ "\n"
-          emittedVars := emittedVars.insert t
+
+  -- Emit modules, merging consecutive ones with compatible context
+  let mut prevContextSrcs : Array String := #[]  -- namespace/open sources from previous module
+  let mut emittedVarSrcs : Std.HashSet String := {}
+  for mc in allModules do
+    -- Check if this module has any TFB declarations
+    let hasTFB := mc.entries.any fun e => match e.cls with | .tfbDecl _ => true | _ => false
+    if !hasTFB then continue
+    let shortName := mc.modName.toString.drop (rootPrefix.toString.length + 1)
+    -- Build this module's core context: namespace and open sources
+    let mut thisContextSrcs : Array String := #[]
+    for e in mc.entries do
+      match e.cls with
+      | .context =>
+        if e.kind == ``Parser.Command.namespace || e.kind == ``Parser.Command.open then
+          thisContextSrcs := thisContextSrcs.push e.src
+      | _ => pure ()
+    if thisContextSrcs == prevContextSrcs && !prevContextSrcs.isEmpty then
+      -- Same context — merge. Just a sub-header.
+      output := output ++ s!"\n-- ─── {shortName} ───\n\n"
+      -- Emit new variables (ones not already emitted)
+      for e in mc.entries do
+        match e.cls with
+        | .context =>
+          if e.kind == ``Parser.Command.variable && !emittedVarSrcs.contains e.src then
+            output := output ++ e.src ++ "\n"
+            emittedVarSrcs := emittedVarSrcs.insert e.src
+        | _ => pure ()
     else
-      -- Different context — close previous and open new
-      if !prevContext.isEmpty then
-        -- Emit end statements from previous context (reverse order)
-        let prevNamespaces := prevContext.filter fun line =>
-          line.trimAsciiStart.toString.startsWith "namespace "
-        for ns in prevNamespaces.reverse do
-          let nsName := (ns.trimAsciiStart.toString.drop 10).toString
-          output := output ++ s!"end {nsName}\n"
+      -- Different context — close previous, open new
+      if !prevContextSrcs.isEmpty then
+        -- Emit end for each namespace in reverse
+        for src in prevContextSrcs.reverse do
+          if src.trimAsciiStart.toString.startsWith "namespace " then
+            let nsName := (src.trimAsciiStart.toString.drop 10).trimAsciiEnd.toString
+            output := output ++ s!"end {nsName}\n"
         output := output ++ "\n"
-      output := output ++ s!"-- ═══ {shortName} ═══\n"
-      emittedVars := {}
-      for line in ctx do
-        let t := line.trimAsciiStart.toString
-        if !t.startsWith "end " then  -- skip end lines in context
-          output := output ++ line ++ "\n"
-          if t.startsWith "variable" then
-            emittedVars := emittedVars.insert t
-    -- Emit declarations
-    for line in decls do
-      output := output ++ line ++ "\n"
-    prevContext := ctx
+      output := output ++ s!"-- ═══ {shortName} ═══\n\n"
+      emittedVarSrcs := {}
+      -- Emit context commands (skip universe/set_option if hoisted, skip end)
+      for e in mc.entries do
+        match e.cls with
+        | .context =>
+          if e.kind == ``Parser.Command.universe then continue  -- hoisted
+          if e.kind == ``Parser.Command.set_option && hoistedOpts.contains e.src then continue
+          if e.kind == ``Parser.Command.«end» then continue  -- we manage ends ourselves
+          -- Skip empty sections (section followed immediately by end with no TFB between)
+          if e.kind == ``Parser.Command.«section» then
+            -- Check if any TFB decl follows before the matching end
+            -- For now, emit all sections — empty ones are a minor cosmetic issue
+            output := output ++ e.src ++ "\n"
+          else
+            output := output ++ e.src ++ "\n"
+          if e.kind == ``Parser.Command.variable then
+            emittedVarSrcs := emittedVarSrcs.insert e.src
+        | _ => pure ()
+    -- Emit TFB declarations
+    for e in mc.entries do
+      match e.cls with
+      | .tfbDecl _ => output := output ++ e.src ++ "\n"
+      | _ => pure ()
+    prevContextSrcs := thisContextSrcs
+
   -- Close final context
-  if !prevContext.isEmpty then
-    let prevNamespaces := prevContext.filter fun line =>
-      line.trimAsciiStart.toString.startsWith "namespace "
-    for ns in prevNamespaces.reverse do
-      let nsName := (ns.trimAsciiStart.toString.drop 10).toString
-      output := output ++ s!"end {nsName}\n"
+  if !prevContextSrcs.isEmpty then
+    for src in prevContextSrcs.reverse do
+      if src.trimAsciiStart.toString.startsWith "namespace " then
+        let nsName := (src.trimAsciiStart.toString.drop 10).trimAsciiEnd.toString
+        output := output ++ s!"end {nsName}\n"
+
+  -- Strip @[informal]/@[expose] from output (these attributes require importing Informal).
+  -- We identify them by string prefix since they're embedded in declaration source text,
+  -- not separate commands.
+  let lines := output.splitOn "\n"
+  let filtered := lines.filter fun line =>
+    let t := line.trimAsciiStart.toString
+    !(t.startsWith "@[informal " || t.startsWith "@[expose]")
+  output := "\n".intercalate filtered
+
   IO.FS.writeFile outputPath output
   IO.eprintln s!"Wrote {outputPath}"
 
