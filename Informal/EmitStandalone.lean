@@ -219,11 +219,12 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
 
   -- Phase 4: Assemble final file
   let mut output := ""
+  output := output ++ "import Mathlib\n"
+  output := output ++ "\n"
   output := output ++ "/-! # Trusted Formalization Base\n"
   output := output ++ s!"{rootPrefix} — `{targetName}`\n"
   output := output ++ "Auto-generated — all proofs replaced with `sorry`.\n"
   output := output ++ "-/\n"
-  output := output ++ "import Mathlib\n"
   for content in fileContents do
     output := output ++ content
   IO.FS.writeFile outputPath output
