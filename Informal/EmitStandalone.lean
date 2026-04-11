@@ -483,8 +483,7 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
         emittedImports := emittedImports.insert imp
         output := output ++ s!"import {imp}\n"
   | none => pure ()
-  if emittedImports.isEmpty then
-    output := output ++ "import Mathlib\n"
+  -- No fallback: if no external imports needed, don't import anything
   output := output ++ "\n"
   output := output ++ "/-! # Trusted Formalization Base\n"
   output := output ++ s!"{rootPrefix} — `{targetName}`\n"
