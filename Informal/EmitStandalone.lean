@@ -115,9 +115,10 @@ def hasSorryableKind (root : Syntax) : Bool := Id.run do
     let stx := worklist.back!
     worklist := worklist.pop
     let k := stx.getKind
-    -- Only sorry theorems/lemmas. Defs/instances keep their bodies
-    -- because downstream code depends on definitional reduction.
-    if k == ``Parser.Command.theorem then
+    -- Sorry theorems and instances (both are typically Prop-valued proofs).
+    -- Defs keep their bodies (downstream code depends on definitional reduction).
+    if k == ``Parser.Command.theorem ||
+       k == ``Parser.Command.instance then
       return true
     for arg in stx.getArgs do
       worklist := worklist.push arg
