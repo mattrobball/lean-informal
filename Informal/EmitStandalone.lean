@@ -271,29 +271,41 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     allModules := allModules.push { modName, entries }
 
   -- Phase 4: Assemble from structured entries
-  -- Collect universes and set_options from context commands (using Syntax kind, not string parsing)
+  -- Collect universes, set_options, opens, and noncomputable from context commands.
+  -- Items that appear in every (or nearly every) module with TFB decls get hoisted.
+  let tfbModules := allModules.filter fun mc =>
+    mc.entries.any fun e => match e.cls with | .tfbDecl _ => true | _ => false
+  let numTFBModules := tfbModules.size
   let mut universeNames : Array String := #[]
-  let mut setOptionSrcs : Std.HashMap String Nat := {}  -- src → count of modules containing it
-  for mc in allModules do
-    let mut seenInModule : Std.HashSet String := {}
+  let mut setOptionCounts : Std.HashMap String Nat := {}
+  let mut openCounts : Std.HashMap String Nat := {}
+  let mut noncompCount : Nat := 0
+  for mc in tfbModules do
+    let mut seenOpts : Std.HashSet String := {}
+    let mut seenOpens : Std.HashSet String := {}
+    let mut hasNoncomp := false
     for e in mc.entries do
       match e.cls with
       | .context =>
         if e.kind == ``Parser.Command.universe then
-          -- Extract universe names from the source (this is the one place we read the string,
-          -- but the command was identified by Syntax kind, not string matching)
           for word in e.src.splitOn " " do
             let w := word.trimAsciiEnd.toString
             if w != "universe" && !w.isEmpty && !universeNames.contains w then
               universeNames := universeNames.push w
-        if e.kind == ``Parser.Command.set_option && !seenInModule.contains e.src then
-          seenInModule := seenInModule.insert e.src
-          setOptionSrcs := setOptionSrcs.insert e.src ((setOptionSrcs.getD e.src 0) + 1)
+        if e.kind == ``Parser.Command.set_option && !seenOpts.contains e.src then
+          seenOpts := seenOpts.insert e.src
+          setOptionCounts := setOptionCounts.insert e.src ((setOptionCounts.getD e.src 0) + 1)
+        if e.kind == ``Parser.Command.open && !seenOpens.contains e.src then
+          seenOpens := seenOpens.insert e.src
+          openCounts := openCounts.insert e.src ((openCounts.getD e.src 0) + 1)
+        if e.kind == ``Parser.Command.«section» && e.src.startsWith "noncomputable section" then
+          hasNoncomp := true
       | _ => pure ()
-  let numModules := allModules.size
+    if hasNoncomp then noncompCount := noncompCount + 1
+  -- Hoist set_options that appear in every TFB module
   let mut hoistedOpts : Array String := #[]
-  for (src, count) in setOptionSrcs do
-    if count == numModules then hoistedOpts := hoistedOpts.push src
+  for (src, count) in setOptionCounts do
+    if count == numTFBModules then hoistedOpts := hoistedOpts.push src
 
   -- Emit header
   let mut output := "import Mathlib\n\n"
@@ -309,82 +321,23 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   unless universeNames.isEmpty do
     output := output ++ "universe " ++ " ".intercalate universeNames.toList ++ "\n\n"
 
-  -- Split each module's entries into preamble / body / postamble.
-  -- Preamble = context entries before first TFB decl
-  -- Body = everything from first TFB decl to last TFB decl (inclusive), context + decls
-  -- Postamble = context entries after last TFB decl (typically `end` statements)
-  let splitEntries (entries : Array CommandEntry) :
-      Array CommandEntry × Array CommandEntry × Array CommandEntry := Id.run do
-    -- Find first and last TFB decl indices
-    let mut firstTFB := entries.size
-    let mut lastTFB := 0
-    for i in [:entries.size] do
-      match entries[i]!.cls with
-      | .tfbDecl _ =>
-        if i < firstTFB then firstTFB := i
-        lastTFB := i
-      | _ => pure ()
-    if firstTFB >= entries.size then return (#[], #[], #[])
-    let preamble := entries[:firstTFB]
-    let body := entries[firstTFB:lastTFB + 1]
-    let postamble := entries[lastTFB + 1:]
-    (preamble.toArray, body.toArray, postamble.toArray)
-  -- Extract the "core preamble" for comparison: namespace/open/noncomputable entries only
-  -- (not variable/section/set_option — those can differ while still being mergeable)
-  let corePreamble (preamble : Array CommandEntry) : Array String := Id.run do
-    let mut core : Array String := #[]
-    for e in preamble do
-      if e.kind == ``Parser.Command.namespace ||
-         e.kind == ``Parser.Command.open then
-        core := core.push e.src
-    core
-  let isSkippable (e : CommandEntry) : Bool :=
-    e.kind == ``Parser.Command.universe ||
-    (e.kind == ``Parser.Command.set_option && hoistedOpts.contains e.src)
-  -- Emit modules with merging
-  let mut prevCore : Array String := #[]
-  let mut prevPostamble : Array CommandEntry := #[]
-  let mut isFirst := true
+  -- Emit modules. Each module emits context + TFB declarations in source order.
+  -- Hoisted set_options and universes are skipped. Spacing between sections.
   for mc in allModules do
     let hasTFB := mc.entries.any fun e => match e.cls with | .tfbDecl _ => true | _ => false
     if !hasTFB then continue
     let shortName := mc.modName.toString.drop (rootPrefix.toString.length + 1)
-    let (preamble, body, postamble) := splitEntries mc.entries
-    let thisCore := corePreamble preamble
-    if thisCore == prevCore && !isFirst then
-      -- Merge: skip previous postamble (already not emitted) and this preamble.
-      -- Emit sub-header and any new variable declarations from preamble.
-      output := output ++ s!"\n-- ─── {shortName} ───\n\n"
-      for e in preamble do
-        if e.kind == ``Parser.Command.variable then
-          output := output ++ e.src ++ "\n"
-    else
-      -- Different context: emit previous postamble, then new section
-      if !isFirst then
-        for e in prevPostamble do
-          if !isSkippable e then
-            output := output ++ e.src ++ "\n"
-        output := output ++ "\n"
-      output := output ++ s!"-- ═══ {shortName} ═══\n\n"
-      for e in preamble do
-        if !isSkippable e then
-          output := output ++ e.src ++ "\n"
-    -- Emit body (context + declarations interleaved)
-    for e in body do
+    output := output ++ s!"-- ═══ {shortName} ═══\n\n"
+    for e in mc.entries do
       match e.cls with
       | .context =>
-        if !isSkippable e then
-          output := output ++ e.src ++ "\n"
+        if e.kind == ``Parser.Command.universe then continue
+        if e.kind == ``Parser.Command.set_option && hoistedOpts.contains e.src then continue
+        output := output ++ e.src ++ "\n"
       | .tfbDecl _ =>
         output := output ++ e.src ++ "\n"
       | .skip => pure ()
-    prevCore := thisCore
-    prevPostamble := postamble
-    isFirst := false
-  -- Emit final postamble
-  for e in prevPostamble do
-    if !isSkippable e then
-      output := output ++ e.src ++ "\n"
+    output := output ++ "\n"
 
   -- Strip @[informal]/@[expose] from output (these attributes require importing Informal).
   -- We identify them by string prefix since they're embedded in declaration source text,
