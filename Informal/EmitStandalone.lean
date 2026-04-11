@@ -169,8 +169,13 @@ def processFile (source : String) (projectEnv : Environment)
         declaredTFBName := some name
         break
     match declaredTFBName with
-    | some _name =>
-      if hasSorryableKind stx then
+    | some tfbName =>
+      -- Sorry theorems (incl Prop-valued instances, which are thmInfo in the env).
+      -- Data-valued defs/instances keep their bodies for type unification.
+      let isThmInEnv := match projectEnv.find? tfbName with
+        | some (.thmInfo _) => true
+        | _ => false
+      if hasSorryableKind stx || isThmInEnv then
         if let some (valStart, _) := findDeclVal? stx then
           let beforeVal := (Substring.Raw.mk source cmdStart valStart).toString
           output := output ++ beforeVal ++ " := sorry\n"
