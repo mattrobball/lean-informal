@@ -33,7 +33,8 @@ namespace Informal.EmitStandalone
 -- ═══ Phase 1: TFB name computation ═══
 
 def computeTFBNames (env : Environment) (rootPrefix : Name) (targetName : Name)
-    (excludePrefixes : Array Name := #[]) : Except String (Std.HashSet Name) := do
+    (excludePrefixes : Array Name := #[])
+    (importedEnv? : Option Environment := none) : Except String (Std.HashSet Name) := do
   let some ci := env.find? targetName
     | .error s!"Target declaration '{targetName}' not found in environment"
   let rawDeps := collectDeps env targetName ci (proofIrrelevant := true)
@@ -41,6 +42,9 @@ def computeTFBNames (env : Environment) (rootPrefix : Name) (targetName : Name)
   result := result.insert targetName
   for dep in rawDeps.toArray do
     let resolved := resolveToUser env dep
+    -- Skip declarations already available from the import
+    if let some impEnv := importedEnv? then
+      if impEnv.contains resolved then continue
     match env.getModuleIdxFor? resolved with
     | some idx =>
       let modName := env.header.moduleNames[idx.toNat]!
@@ -49,6 +53,10 @@ def computeTFBNames (env : Environment) (rootPrefix : Name) (targetName : Name)
           && (classifyNonUser env resolved).isNone then
         result := result.insert resolved
     | none => pure ()
+  -- Also check if target itself is already imported
+  if let some impEnv := importedEnv? then
+    if impEnv.contains targetName then
+      result := result.erase targetName
   return result
 
 -- ═══ Phase 2: Topological sort (Kahn's algorithm) ═══
@@ -231,11 +239,41 @@ def coreContextSignature (entries : Array CommandEntry) : Array SyntaxNodeKind :
 def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     (outputPath : System.FilePath)
     (excludePrefixes : Array Name := #[]) : IO Unit := do
-  -- Phase 1: TFB names
+  -- Phase 1: Determine target module and its imports.
+  -- Import the target module's direct imports — these transitively cover all
+  -- dependencies. Only declarations from the target's own module (or other
+  -- non-imported modules) need to be emitted.
+  let targetModName := match env.getModuleIdxFor? targetName with
+    | some idx => env.header.moduleNames[idx.toNat]!
+    | none => rootPrefix
+  -- Get all modules transitively imported by the target module's imports
+  let targetModIdx := env.getModuleIdx? targetModName
+  let importedModules : Std.HashSet Name := Id.run do
+    let mut imported : Std.HashSet Name := {}
+    -- All modules with index < target module's index are imported by it
+    -- (since moduleNames is in dependency-first order)
+    if let some tIdx := targetModIdx then
+      for i in [:tIdx.toNat] do
+        imported := imported.insert env.header.moduleNames[i]!
+    imported
+  IO.eprintln s!"Target module: {targetModName}"
+  IO.eprintln s!"Imported modules: {importedModules.size}"
+
+  -- Phase 1b: TFB names — filter out declarations already available from imports
   let tfbNames ← match computeTFBNames env rootPrefix targetName excludePrefixes with
     | .ok names => pure names
     | .error msg => throw (IO.userError msg)
-  IO.eprintln s!"TFB: {tfbNames.size} declarations"
+  -- Remove TFB names whose module is already imported
+  let mut filteredNames : Std.HashSet Name := {}
+  for name in tfbNames do
+    match env.getModuleIdxFor? name with
+    | some idx =>
+      let modName := env.header.moduleNames[idx.toNat]!
+      if !importedModules.contains modName then
+        filteredNames := filteredNames.insert name
+    | none => filteredNames := filteredNames.insert name
+  IO.eprintln s!"TFB: {tfbNames.size} total, {filteredNames.size} need emitting"
+  let tfbNames := filteredNames
 
   -- Phase 2: Module order from env.header.moduleNames (= import DAG order).
   -- Verified in Lean/Environment.lean:2120-2123: `importModulesCore` calls `goRec mod`
@@ -251,7 +289,7 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     if moduleSet.contains modName then
       modIdxPairs := modIdxPairs.push (modName, i)
   let orderedModules := (modIdxPairs.qsort fun a b => a.2 < b.2).map (·.1)
-  IO.eprintln s!"TFB spans {orderedModules.size} modules"
+  IO.eprintln s!"Emitting from {orderedModules.size} modules"
 
   -- Phase 3: Build tfbRangeMap per module and process each file
   let mut allModules : Array ModuleContent := #[]
@@ -307,8 +345,23 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   for (src, count) in setOptionCounts do
     if count == numTFBModules then hoistedOpts := hoistedOpts.push src
 
-  -- Emit header
-  let mut output := "import Mathlib\n\n"
+  -- Emit header — import the target module's direct imports
+  -- (which transitively cover all dependencies)
+  let mut output := ""
+  -- Get target module's direct imports from the environment header
+  let targetImports : Array Name := Id.run do
+    if targetModName == env.header.mainModule then
+      return env.header.imports.map Import.module
+    match env.getModuleIdx? targetModName with
+    | some idx => return env.header.moduleData[idx.toNat]!.imports.map Import.module
+    | none => return #[]
+  if targetImports.isEmpty then
+    output := output ++ "import Mathlib\n"
+  else
+    for imp in targetImports do
+      if imp != `Init then
+        output := output ++ s!"import {imp}\n"
+  output := output ++ "\n"
   output := output ++ "/-! # Trusted Formalization Base\n"
   output := output ++ s!"{rootPrefix} — `{targetName}`\n"
   output := output ++ s!"Auto-generated — all proofs replaced with `sorry`.\n"
