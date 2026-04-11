@@ -232,13 +232,24 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     if !content.trimAsciiEnd.toString.isEmpty then
       allContent := allContent.push (modName, content)
 
-  -- Phase 4: Assemble with consolidated header
-  -- Collect universe names and set_options across all files
+  -- Phase 4: Assemble with consolidated header and merged contexts
+  -- Classify each line as context vs content
+  let isContextLine (t : String) : Bool :=
+    t.startsWith "noncomputable section" ||
+    t.startsWith "open " ||
+    t.startsWith "namespace " ||
+    t.startsWith "variable " ||
+    t.startsWith "attribute " ||
+    t.startsWith "end "
+  let isStrippable (t : String) (hoistedOpts : Array String) : Bool :=
+    t.startsWith "universe " ||
+    t.startsWith "@[informal " ||
+    t.startsWith "@[expose]" ||
+    hoistedOpts.contains t
+  -- Collect universes, find universal set_options
   let mut universeNames : Array String := #[]
-  let mut setOptions : Array String := #[]
-  let numSections := allContent.size
-  -- Count occurrences of each set_option to find universal ones
   let mut setOptionCounts : Std.HashMap String Nat := {}
+  let numSections := allContent.size
   for (_, content) in allContent do
     let mut seenInFile : Std.HashSet String := {}
     for line in content.splitOn "\n" do
@@ -251,10 +262,27 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
       if t.startsWith "set_option " && !seenInFile.contains t then
         seenInFile := seenInFile.insert t
         setOptionCounts := setOptionCounts.insert t ((setOptionCounts.getD t 0) + 1)
-  -- set_options that appear in every section get hoisted
+  let mut hoistedOpts : Array String := #[]
   for (opt, count) in setOptionCounts do
-    if count == numSections then
-      setOptions := setOptions.push opt
+    if count == numSections then hoistedOpts := hoistedOpts.push opt
+  -- Extract context signature per section for merging
+  -- A context signature = the set of context lines (noncomputable, open, namespace, variable)
+  let extractContext (content : String) : Array String := Id.run do
+    let mut ctx : Array String := #[]
+    for line in content.splitOn "\n" do
+      let t := line.trimAsciiStart.toString
+      if isContextLine t && !isStrippable t hoistedOpts then
+        ctx := ctx.push line
+    ctx
+  -- Extract non-context, non-strippable content lines
+  let extractDecls (content : String) : Array String := Id.run do
+    let mut decls : Array String := #[]
+    for line in content.splitOn "\n" do
+      let t := line.trimAsciiStart.toString
+      if !isContextLine t && !isStrippable t hoistedOpts && !t.isEmpty then
+        decls := decls.push line
+    decls
+  -- Emit header
   let mut output := "import Mathlib\n\n"
   output := output ++ "/-! # Trusted Formalization Base\n"
   output := output ++ s!"{rootPrefix} — `{targetName}`\n"
@@ -262,67 +290,65 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   output := output ++ s!"{tfbNames.size} declarations in dependency order.\n"
   output := output ++ "-/\n\n"
   output := output ++ "set_option maxHeartbeats 400000\n"
-  for opt in setOptions do
+  for opt in hoistedOpts do
     output := output ++ opt ++ "\n"
   output := output ++ "\n"
   unless universeNames.isEmpty do
     output := output ++ "universe " ++ " ".intercalate universeNames.toList ++ "\n\n"
+  -- Emit sections, merging consecutive ones with identical context
+  let mut prevContext : Array String := #[]
+  let mut emittedVars : Std.HashSet String := {}
   for (modName, content) in allContent do
     let shortName := modName.toString.drop (rootPrefix.toString.length + 1)
-    output := output ++ s!"-- ═══ {shortName} ═══\n"
-    let lines := content.splitOn "\n"
-    -- Strip: universes (hoisted), @[informal/@[expose] (unavailable),
-    -- hoisted set_options, and empty section/end pairs
-    let filtered := lines.filter fun line =>
+    let ctx := extractContext content
+    let decls := extractDecls content
+    if decls.isEmpty then continue
+    -- Check if context matches previous (can merge)
+    -- Extract just namespace/noncomputable/open lines (not variable/end)
+    let coreCtx := ctx.filter fun line =>
       let t := line.trimAsciiStart.toString
-      !(t.startsWith "universe " ||
-        t.startsWith "@[informal " ||
-        t.startsWith "@[expose]" ||
-        setOptions.contains t)
-    -- Remove empty section/end pairs: sections containing only variable/blank lines
-    let filtArr := filtered.toArray
-    let mut cleaned : Array String := #[]
-    let mut i := 0
-    while i < filtArr.size do
-      let t := filtArr[i]!.trimAsciiStart.toString
-      if t.startsWith "section" then
-        -- Scan ahead: if only variable/blank/end lines until matching end, skip block
-        let mut j := i + 1
-        let mut isEmpty := true
-        let mut endIdx := i  -- will be set to the end line index
-        while j < filtArr.size do
-          let u := filtArr[j]!.trimAsciiStart.toString
-          if u.startsWith "end" || u == "end" then
-            endIdx := j
-            break
-          else if u.isEmpty || u.startsWith "variable" ||
-              u.startsWith "[" || u.startsWith "(" || u.startsWith "{" then
-            j := j + 1
-          else
-            isEmpty := false
-            break
-        if isEmpty && endIdx > i then
-          -- Skip the entire empty section block
-          i := endIdx + 1
-        else
-          cleaned := cleaned.push filtArr[i]!
-          i := i + 1
-      else
-        cleaned := cleaned.push filtArr[i]!
-        i := i + 1
-    -- Collapse multiple consecutive blank lines into one
-    let mut final : Array String := #[]
-    let mut prevBlank := false
-    for line in cleaned do
-      if line.trimAsciiEnd.toString.isEmpty then
-        if !prevBlank then
-          final := final.push ""
-        prevBlank := true
-      else
-        final := final.push line
-        prevBlank := false
-    output := output ++ "\n".intercalate final.toList
-    output := output ++ "\n"
+      t.startsWith "noncomputable" || t.startsWith "open " || t.startsWith "namespace "
+    let prevCoreCtx := prevContext.filter fun line =>
+      let t := line.trimAsciiStart.toString
+      t.startsWith "noncomputable" || t.startsWith "open " || t.startsWith "namespace "
+    if coreCtx == prevCoreCtx && !prevContext.isEmpty then
+      -- Same context — just emit section header comment and declarations
+      output := output ++ s!"\n-- ─── {shortName} ───\n"
+      -- Emit any new variables not yet in scope
+      for line in ctx do
+        let t := line.trimAsciiStart.toString
+        if t.startsWith "variable" && !emittedVars.contains t then
+          output := output ++ line ++ "\n"
+          emittedVars := emittedVars.insert t
+    else
+      -- Different context — close previous and open new
+      if !prevContext.isEmpty then
+        -- Emit end statements from previous context (reverse order)
+        let prevNamespaces := prevContext.filter fun line =>
+          line.trimAsciiStart.toString.startsWith "namespace "
+        for ns in prevNamespaces.reverse do
+          let nsName := (ns.trimAsciiStart.toString.drop 10).toString
+          output := output ++ s!"end {nsName}\n"
+        output := output ++ "\n"
+      output := output ++ s!"-- ═══ {shortName} ═══\n"
+      emittedVars := {}
+      for line in ctx do
+        let t := line.trimAsciiStart.toString
+        if !t.startsWith "end " then  -- skip end lines in context
+          output := output ++ line ++ "\n"
+          if t.startsWith "variable" then
+            emittedVars := emittedVars.insert t
+    -- Emit declarations
+    for line in decls do
+      output := output ++ line ++ "\n"
+    prevContext := ctx
+  -- Close final context
+  if !prevContext.isEmpty then
+    let prevNamespaces := prevContext.filter fun line =>
+      line.trimAsciiStart.toString.startsWith "namespace "
+    for ns in prevNamespaces.reverse do
+      let nsName := (ns.trimAsciiStart.toString.drop 10).toString
+      output := output ++ s!"end {nsName}\n"
   IO.FS.writeFile outputPath output
   IO.eprintln s!"Wrote {outputPath}"
 
