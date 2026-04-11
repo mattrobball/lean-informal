@@ -70,11 +70,10 @@ def orderModules (env : Environment) (modules : Array Name) : Array Name := Id.r
 def needsSorry (env : Environment) (name : Name) : Bool :=
   match env.find? name with
   | some (.thmInfo _) => true
-  | some (.defnInfo di) =>
+  | some (.defnInfo _) =>
     -- Abbrevs should keep their bodies (needed for reducibility)
-    match Lean.isReducible env name with
-    | true => false  -- it's an abbrev
-    | false => true
+    if (Lean.getReducibilityStatus env name) == .reducible then false
+    else true
   | some (.opaqueInfo _) => false  -- already opaque
   | _ => false
 
@@ -126,9 +125,9 @@ def sorryifySource (source : String) : String := Id.run do
     -- Check if `:=` comes before `where`, or if no `where`
     let useAssign := !foundWhere || assignIdx < whereIdx
     if useAssign then
-      return (source.take assignIdx).trimRight ++ " := sorry"
+      return (source.take assignIdx).trimAsciiRight ++ " := sorry"
   if foundWhere then
-    return (source.take whereIdx).trimRight ++ " := sorry"
+    return (source.take whereIdx).trimAsciiRight ++ " := sorry"
 
   -- Fallback: couldn't find assignment, return as-is
   return source
@@ -151,7 +150,7 @@ def processModule (env : Environment) (modName : Name) (rootPrefix : Name)
   for name in declNames do
     if let some ranges := (← findDeclarationRanges? name) then
       rangeEntries := rangeEntries.push (name, ranges.range.pos.line, ranges.range.endPos.line)
-  let rangeEntries := rangeEntries.qsort fun a b => a.2.1 < b.2.1
+  rangeEntries := rangeEntries.qsort fun a b => a.2.1 < b.2.1
 
   if rangeEntries.isEmpty then return none
 
