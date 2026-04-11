@@ -138,7 +138,11 @@ def isContextCmd (stx : Syntax) : Bool :=
   k == ``Parser.Command.universe ||
   k == ``Parser.Command.attribute
 
-/-- Check whether a declaration needs its body sorry'd. -/
+/-- Look up declaration ranges from the environment extension. -/
+def findDeclRanges? (env : Environment) (name : Name) : Option DeclarationRanges :=
+  declRangeExt.find? (level := .exported) env name <|>
+    declRangeExt.find? (level := .server) env name
+
 def needsSorry (env : Environment) (name : Name) : Bool :=
   match env.find? name with
   | some (.thmInfo _) => true
@@ -155,45 +159,42 @@ def needsSorry (env : Environment) (name : Name) : Bool :=
     environment snapshots from InfoTrees to identify which commands declare
     TFB names. -/
 def processFile (filePath : System.FilePath) (tfbNames : Std.HashSet Name)
-    (projectEnv : Environment) : IO String := do
+    (projectEnv : Environment)
+    (tfbRangeMap : Std.HashMap String.Pos.Raw Name) : IO String := do
   IO.eprintln s!"  Re-elaborating {filePath}"
   let input ← IO.FS.readFile filePath
   let inputCtx := Parser.mkInputContext input filePath.toString
-  -- Parse header to advance past imports, but reuse the project's already-loaded env
+  -- Parse header to advance past imports, reuse the project's env
   let (_, parserState, messages) ← Parser.parseHeader inputCtx
   let cmdState := { Command.mkState projectEnv messages {} with infoState.enabled := true }
   let finalState ← IO.processCommands inputCtx parserState cmdState
-  -- Get all commands (except EOI) and all InfoTrees
-  let commands := finalState.commands.pop  -- Remove terminal EOI
   let trees := finalState.commandState.infoState.trees.toArray
   let mut output := ""
-  -- Walk each InfoTree to get CommandInfo with env before/after
   for tree in trees do
-    -- Extract the outermost CommandInfo from this tree
-    let cmdResult := tree.foldInfo (init := none) fun ctx info acc =>
+    let cmdResult := tree.foldInfo (init := none) fun _ctx info acc =>
       match acc with
       | some _ => acc
       | none =>
         match info with
-        | .ofCommandInfo ci => some (ci.stx, ctx.env, ctx.cmdEnv?.getD ctx.env)
+        | .ofCommandInfo ci => some ci.stx
         | _ => none
-    let some (stx, envBefore, envAfter) := cmdResult | continue
+    let some stx := cmdResult | continue
     let some cmdStart := stx.getPos? | continue
     let some cmdEnd := stx.getTailPos? | continue
     let cmdSrc := (Substring.Raw.mk input cmdStart cmdEnd).toString
     -- Skip header
     if stx.getKind == ``Parser.Module.header then continue
-    -- Check if this command declared any TFB names
+    -- Match this command to a TFB declaration using source positions:
+    -- check if any TFB declaration's start position falls within this command
     let mut declaredTFBName : Option Name := none
-    for name in tfbNames do
-      if envAfter.contains name && !envBefore.contains name then
+    for (pos, name) in tfbRangeMap do
+      if pos >= cmdStart && pos < cmdEnd then
         declaredTFBName := some name
         break
     match declaredTFBName with
     | some name =>
       if needsSorry projectEnv name && hasSorryableKind stx then
-        if let some (valStart, valEnd) := findDeclVal? stx then
-          -- Emit source before declVal, then sorry
+        if let some (valStart, _) := findDeclVal? stx then
           let beforeVal := (Substring.Raw.mk input cmdStart valStart).toString
           output := output ++ beforeVal ++ " := sorry\n"
         else
@@ -227,10 +228,21 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
         moduleSet := moduleSet.insert modName
     | none => pure ()
   IO.eprintln s!"TFB spans {seenModules.size} modules"
+  -- Build range map: source byte position → TFB name (for matching commands to decls)
+  let mut tfbRangeMap : Std.HashMap String.Pos.Raw Name := {}
+  for name in tfbNames do
+    if let some ranges := findDeclRanges? env name then
+      let filePath := match env.getModuleIdxFor? name with
+        | some idx => env.header.moduleNames[idx.toNat]!.toString.replace "." "/" ++ ".lean"
+        | none => ""
+      let source ← IO.FS.readFile filePath
+      let fileMap := FileMap.ofString source
+      let bytePos := fileMap.ofPosition ranges.range.pos
+      tfbRangeMap := tfbRangeMap.insert bytePos name
   let mut fileContents : Array String := #[]
   for modName in seenModules do
     let filePath := modName.toString.replace "." "/" ++ ".lean"
-    let content ← processFile filePath tfbNames env
+    let content ← processFile filePath tfbNames env tfbRangeMap
     if !content.trimAsciiEnd.toString.isEmpty then
       let shortName := modName.toString.drop (rootPrefix.toString.length + 1)
       fileContents := fileContents.push (s!"\n-- ═══ {shortName} ═══\n" ++ content)
