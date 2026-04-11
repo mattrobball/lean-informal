@@ -233,6 +233,16 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
       allContent := allContent.push (modName, content)
 
   -- Phase 4: Assemble with consolidated header
+  -- Collect all universe names from all files
+  let mut universeNames : Array String := #[]
+  for (_, content) in allContent do
+    for line in content.splitOn "\n" do
+      let t := line.trimAsciiStart.toString
+      if t.startsWith "universe " then
+        for name in (t.drop 9).toString.splitOn " " do
+          let name := name.trimAsciiEnd.toString
+          if !name.isEmpty && !universeNames.contains name then
+            universeNames := universeNames.push name
   let mut output := "import Mathlib\n\n"
   output := output ++ "/-! # Trusted Formalization Base\n"
   output := output ++ s!"{rootPrefix} — `{targetName}`\n"
@@ -240,10 +250,12 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   output := output ++ s!"{tfbNames.size} declarations in dependency order.\n"
   output := output ++ "-/\n\n"
   output := output ++ "set_option maxHeartbeats 400000\n\n"
+  unless universeNames.isEmpty do
+    output := output ++ "universe " ++ " ".intercalate universeNames.toList ++ "\n\n"
   for (modName, content) in allContent do
     let shortName := modName.toString.drop (rootPrefix.toString.length + 1)
     output := output ++ s!"-- ═══ {shortName} ═══\n"
-    -- Strip duplicate universe declarations (they'll conflict across files)
+    -- Strip per-file universe declarations (consolidated above)
     -- and @[informal]/@[expose] attributes
     let lines := content.splitOn "\n"
     let filtered := lines.filter fun line =>
