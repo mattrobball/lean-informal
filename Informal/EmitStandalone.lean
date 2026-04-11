@@ -328,14 +328,21 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     if !hasTFB then continue
     let shortName := mc.modName.toString.drop (rootPrefix.toString.length + 1)
     output := output ++ s!"-- ═══ {shortName} ═══\n\n"
+    let mut prevWasDecl := false
     for e in mc.entries do
       match e.cls with
       | .context =>
         if e.kind == ``Parser.Command.universe then continue
         if e.kind == ``Parser.Command.set_option && hoistedOpts.contains e.src then continue
+        -- Add blank line before context that follows a declaration
+        if prevWasDecl then output := output ++ "\n"
         output := output ++ e.src ++ "\n"
+        prevWasDecl := false
       | .tfbDecl _ =>
+        -- Add blank line before each declaration (between decls or after context block)
+        if prevWasDecl then output := output ++ "\n"
         output := output ++ e.src ++ "\n"
+        prevWasDecl := true
       | .skip => pure ()
     output := output ++ "\n"
 
