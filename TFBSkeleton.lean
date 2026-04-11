@@ -21,7 +21,7 @@ unsafe def main (args : List String) : IO Unit := do
     let rootName := root.toName
     let targetName := target.toName
     -- Import the project module
-    let env ← importModules #[{ module := rootName }] {} (trustLevel := 1024)
+    let env ← importModules (loadExts := true) #[{ module := rootName }] {} (trustLevel := 1024)
     emitStandalone env rootName targetName output
   | _ =>
     IO.eprintln "Usage: lake exe tfb_skeleton <rootPrefix> <targetDecl> <outputPath>"
