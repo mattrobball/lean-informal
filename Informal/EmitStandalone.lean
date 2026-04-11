@@ -309,74 +309,24 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   unless universeNames.isEmpty do
     output := output ++ "universe " ++ " ".intercalate universeNames.toList ++ "\n\n"
 
-  -- Emit modules, merging consecutive ones with compatible context
-  let mut prevContextSrcs : Array String := #[]  -- namespace/open sources from previous module
-  let mut emittedVarSrcs : Std.HashSet String := {}
+  -- Emit modules. Each module emits its context commands (from the source, including
+  -- section/end pairs) and its TFB declarations. Context commands identified by Syntax
+  -- kind; hoisted set_options and universes are skipped.
   for mc in allModules do
-    -- Check if this module has any TFB declarations
     let hasTFB := mc.entries.any fun e => match e.cls with | .tfbDecl _ => true | _ => false
     if !hasTFB then continue
     let shortName := mc.modName.toString.drop (rootPrefix.toString.length + 1)
-    -- Build this module's core context: namespace and open sources
-    let mut thisContextSrcs : Array String := #[]
+    output := output ++ s!"-- ═══ {shortName} ═══\n\n"
+    -- Emit context and declarations in source order
     for e in mc.entries do
       match e.cls with
       | .context =>
-        if e.kind == ``Parser.Command.namespace || e.kind == ``Parser.Command.open then
-          thisContextSrcs := thisContextSrcs.push e.src
-      | _ => pure ()
-    if thisContextSrcs == prevContextSrcs && !prevContextSrcs.isEmpty then
-      -- Same context — merge. Just a sub-header.
-      output := output ++ s!"\n-- ─── {shortName} ───\n\n"
-      -- Emit new variables (ones not already emitted)
-      for e in mc.entries do
-        match e.cls with
-        | .context =>
-          if e.kind == ``Parser.Command.variable && !emittedVarSrcs.contains e.src then
-            output := output ++ e.src ++ "\n"
-            emittedVarSrcs := emittedVarSrcs.insert e.src
-        | _ => pure ()
-    else
-      -- Different context — close previous, open new
-      if !prevContextSrcs.isEmpty then
-        -- Emit end for each namespace in reverse
-        for src in prevContextSrcs.reverse do
-          if src.trimAsciiStart.toString.startsWith "namespace " then
-            let nsName := (src.trimAsciiStart.toString.drop 10).trimAsciiEnd.toString
-            output := output ++ s!"end {nsName}\n"
-        output := output ++ "\n"
-      output := output ++ s!"-- ═══ {shortName} ═══\n\n"
-      emittedVarSrcs := {}
-      -- Emit context commands (skip universe/set_option if hoisted, skip end)
-      for e in mc.entries do
-        match e.cls with
-        | .context =>
-          if e.kind == ``Parser.Command.universe then continue  -- hoisted
-          if e.kind == ``Parser.Command.set_option && hoistedOpts.contains e.src then continue
-          if e.kind == ``Parser.Command.«end» then continue  -- we manage ends ourselves
-          -- Skip empty sections (section followed immediately by end with no TFB between)
-          if e.kind == ``Parser.Command.«section» then
-            -- Check if any TFB decl follows before the matching end
-            -- For now, emit all sections — empty ones are a minor cosmetic issue
-            output := output ++ e.src ++ "\n"
-          else
-            output := output ++ e.src ++ "\n"
-          if e.kind == ``Parser.Command.variable then
-            emittedVarSrcs := emittedVarSrcs.insert e.src
-        | _ => pure ()
-    -- Emit TFB declarations
-    for e in mc.entries do
-      match e.cls with
-      | .tfbDecl _ => output := output ++ e.src ++ "\n"
-      | _ => pure ()
-    prevContextSrcs := thisContextSrcs
-
-  -- Close final context
-  if !prevContextSrcs.isEmpty then
-    for src in prevContextSrcs.reverse do
-      if src.trimAsciiStart.toString.startsWith "namespace " then
-        let nsName := (src.trimAsciiStart.toString.drop 10).trimAsciiEnd.toString
-        output := output ++ s!"end {nsName}\n"
+        if e.kind == ``Parser.Command.universe then continue  -- hoisted to top
+        if e.kind == ``Parser.Command.set_option && hoistedOpts.contains e.src then continue
+        output := output ++ e.src ++ "\n"
+      | .tfbDecl _ =>
+        output := output ++ e.src ++ "\n"
+      | .skip => pure ()
 
   -- Strip @[informal]/@[expose] from output (these attributes require importing Informal).
   -- We identify them by string prefix since they're embedded in declaration source text,
