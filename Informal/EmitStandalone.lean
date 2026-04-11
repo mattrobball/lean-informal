@@ -139,11 +139,10 @@ inductive CommandAction where
 /-- Parse a source file (no elaboration) and classify each command.
     Uses DeclarationRanges from the pre-compiled environment to match
     parsed commands to TFB declarations. -/
-def classifyCommandsParsed (env : Environment) (filePath : System.FilePath)
-    (tfbNames : Std.HashSet Name)
+def classifyCommandsParsed (env : Environment) (fullEnv : Environment) (filePath : System.FilePath)
     (tfbRangeMap : Std.HashMap String.Pos.Raw Name) : IO (Array (String.Pos.Raw × String.Pos.Raw × CommandAction)) := do
-  -- Parse (no elaboration) — fast, uses env only for token table
-  let moduleSyntax ← Parser.testParseFile env filePath
+  -- Parse (no elaboration) — fast, uses fullEnv for token/notation tables
+  let moduleSyntax ← Parser.testParseFile fullEnv filePath
   let stx := moduleSyntax.raw
   -- stx is `Lean.Parser.Module.module` with children [header, commandList]
   let args := stx.getArgs
@@ -208,8 +207,8 @@ def applyActions (source : String)
 -- ═══ Phase 4: Assembly ═══
 
 /-- Process a single module. -/
-def processModule (env : Environment) (modName : Name) (rootPrefix : Name)
-    (tfbNames : Std.HashSet Name) (declNames : Array Name) : IO (Option String) := do
+def processModule (env : Environment) (fullEnv : Environment) (modName : Name)
+    (rootPrefix : Name) (declNames : Array Name) : IO (Option String) := do
   let sourcePath := modName.toString.replace "." "/" ++ ".lean"
 
   -- Build a map from source byte position → TFB name for this module
@@ -222,7 +221,7 @@ def processModule (env : Environment) (modName : Name) (rootPrefix : Name)
       tfbRangeMap := tfbRangeMap.insert bytePos name
 
   IO.eprintln s!"  Parsing {sourcePath} ({declNames.size} TFB decls)"
-  let actions ← classifyCommandsParsed env sourcePath tfbNames tfbRangeMap
+  let actions ← classifyCommandsParsed env fullEnv sourcePath tfbRangeMap
   let content := applyActions source actions
   if content.trimAsciiEnd.toString.isEmpty then return none
   let shortName := modName.toString.drop (rootPrefix.toString.length + 1)
@@ -251,7 +250,7 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   let mut fileContents : Array String := #[]
   for modName in orderedModules do
     let some declNames := moduleMap[modName]? | continue
-    let some content ← processModule env modName rootPrefix tfbNames declNames
+    let some content ← processModule env env modName rootPrefix declNames
       | continue
     fileContents := fileContents.push content
 
