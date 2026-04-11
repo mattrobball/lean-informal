@@ -397,6 +397,9 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   IO.eprintln s!"Emitting from {orderedModules.size} modules"
 
   -- Phase 3: Build tfbRangeMap per module and process each file
+  -- Track TFB declarations that have no source ranges (elaborator-generated).
+  -- These will be pretty-printed from the environment as a fallback.
+  let mut rangelessNames : Array Name := #[]
   let mut allModules : Array ModuleContent := #[]
   for modName in orderedModules do
     let filePath := modName.toString.replace "." "/" ++ ".lean"
@@ -409,7 +412,9 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
           if let some ranges := findDeclRanges? env name then
             let bytePos := fileMap.ofPosition ranges.range.pos
             tfbRangeMap := tfbRangeMap.insert bytePos name
-    IO.eprintln s!"  {filePath} ({tfbRangeMap.size} TFB decls)"
+          else
+            rangelessNames := rangelessNames.push name
+    IO.eprintln s!"  {filePath} ({tfbRangeMap.size} TFB decls, {rangelessNames.size} rangeless)"
     let entries ← processFile source env tfbRangeMap filePath cfg
     allModules := allModules.push { modName, entries }
 
@@ -492,6 +497,31 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   output := output ++ "\n"
   unless universeNames.isEmpty do
     output := output ++ "universe " ++ " ".intercalate universeNames.toList ++ "\n\n"
+
+  -- Emit rangeless declarations (elaborator-generated, no source) from environment.
+  -- These come BEFORE source-extracted modules since source decls may depend on them.
+  if !rangelessNames.isEmpty then
+    output := output ++ "-- ═══ Elaborator-generated declarations ═══\n\n"
+    let ctx : Core.Context := { fileName := "<emit>", fileMap := default }
+    let state : Core.State := { env }
+    let (ppResults, _) ← (do
+      let mut results : Array String := #[]
+      for name in rangelessNames do
+        let some ci := env.find? name | continue
+        let decl ← (do
+          let sig : FormatWithInfos ← PrettyPrinter.ppSignature name
+          match ci with
+          | .thmInfo _ => return s!"theorem {sig.fmt} := sorry"
+          | .defnInfo dv => do
+            let val ← Meta.ppExpr dv.value
+            return s!"def {sig.fmt} :=\n  {val}"
+          | _ => return s!"-- {name}: unsupported kind for rangeless emission"
+          : MetaM String).run'
+        results := results.push decl
+      return results : CoreM _).toIO ctx state
+    for pp in ppResults do
+      output := output ++ "\n" ++ pp ++ "\n"
+    output := output ++ "\n"
 
   -- Emit modules. Each module emits context + TFB declarations in source order.
   -- Hoisted set_options and universes are skipped. Spacing between sections.
