@@ -236,6 +236,40 @@ def coreContextSignature (entries : Array CommandEntry) : Array SyntaxNodeKind :
     | _ => pure ()
   sig
 
+/-- Remove empty section/end pairs from entries. A section is empty if it
+    contains no TFB declarations between its `section` and `end` entries —
+    only variable/context commands. Uses Syntax kinds, not string parsing. -/
+def stripEmptySections (entries : Array CommandEntry) : Array CommandEntry := Id.run do
+  let mut result : Array CommandEntry := #[]
+  let mut i := 0
+  while i < entries.size do
+    let e := entries[i]!
+    if e.kind == ``Parser.Command.«section» then
+      let mut j := i + 1
+      let mut hasTFBInside := false
+      let mut foundEnd := false
+      while j < entries.size do
+        let ej := entries[j]!
+        if ej.kind == ``Parser.Command.«end» then
+          foundEnd := true
+          break
+        if let .tfbDecl _ := ej.cls then
+          hasTFBInside := true
+          break
+        if ej.kind == ``Parser.Command.«section» then
+          hasTFBInside := true
+          break
+        j := j + 1
+      if !hasTFBInside && foundEnd then
+        i := j + 1
+      else
+        result := result.push e
+        i := i + 1
+    else
+      result := result.push e
+      i := i + 1
+  result
+
 def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     (outputPath : System.FilePath)
     (excludePrefixes : Array Name := #[]) : IO Unit := do
@@ -297,7 +331,7 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
             tfbRangeMap := tfbRangeMap.insert bytePos name
     IO.eprintln s!"  {filePath} ({tfbRangeMap.size} TFB decls)"
     let entries ← processFile source env tfbRangeMap filePath
-    allModules := allModules.push { modName, entries }
+    allModules := allModules.push { modName, entries := stripEmptySections entries }
 
   -- Phase 4: Assemble from structured entries
   -- Collect universes, set_options, opens, and noncomputable from context commands.
