@@ -245,23 +245,24 @@ def stripEmptySections (entries : Array CommandEntry) : Array CommandEntry := Id
   while i < entries.size do
     let e := entries[i]!
     if e.kind == ``Parser.Command.«section» then
+      -- Scan ahead tracking nesting depth. An empty section has no TFB decls
+      -- at any nesting level before its matching end.
       let mut j := i + 1
       let mut hasTFBInside := false
-      let mut foundEnd := false
-      while j < entries.size do
+      let mut depth := 1  -- we're inside one section
+      while j < entries.size && depth > 0 do
         let ej := entries[j]!
-        if ej.kind == ``Parser.Command.«end» then
-          foundEnd := true
-          break
-        if let .tfbDecl _ := ej.cls then
-          hasTFBInside := true
-          break
         if ej.kind == ``Parser.Command.«section» then
+          depth := depth + 1
+        else if ej.kind == ``Parser.Command.«end» then
+          depth := depth - 1
+        else if let .tfbDecl _ := ej.cls then
           hasTFBInside := true
           break
         j := j + 1
-      if !hasTFBInside && foundEnd then
-        i := j + 1
+      if !hasTFBInside && depth == 0 then
+        -- Skip the entire section block (section + contents + matching end)
+        i := j
       else
         result := result.push e
         i := i + 1
@@ -331,6 +332,7 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
             tfbRangeMap := tfbRangeMap.insert bytePos name
     IO.eprintln s!"  {filePath} ({tfbRangeMap.size} TFB decls)"
     let entries ← processFile source env tfbRangeMap filePath
+    -- Debug: dump section-related entries
     allModules := allModules.push { modName, entries := stripEmptySections entries }
 
   -- Phase 4: Assemble from structured entries
@@ -406,9 +408,8 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   output := output ++ s!"Auto-generated — all proofs replaced with `sorry`.\n"
   output := output ++ s!"{tfbNames.size} declarations in dependency order.\n"
   output := output ++ "-/\n\n"
-  output := output ++ "set_option maxHeartbeats 400000\n"
-  for opt in hoistedOpts do
-    output := output ++ opt ++ "\n"
+  -- set_options are stripped entirely — they're project-specific and unnecessary
+  -- for the standalone skeleton.
   output := output ++ "\n"
   unless universeNames.isEmpty do
     output := output ++ "universe " ++ " ".intercalate universeNames.toList ++ "\n\n"
@@ -425,7 +426,7 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
       match e.cls with
       | .context =>
         if e.kind == ``Parser.Command.universe then continue
-        if e.kind == ``Parser.Command.set_option && hoistedOpts.contains e.src then continue
+        if e.kind == ``Parser.Command.set_option then continue
         -- Add blank line before context that follows a declaration
         if prevWasDecl then output := output ++ "\n"
         output := output ++ e.src ++ "\n"
@@ -446,6 +447,8 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     let t := line.trimAsciiStart.toString
     !(t.startsWith "@[informal " || t.startsWith "@[expose]")
   output := "\n".intercalate filtered
+  -- Trim trailing whitespace
+  output := output.trimAsciiEnd.toString ++ "\n"
 
   IO.FS.writeFile outputPath output
   IO.eprintln s!"Wrote {outputPath}"
