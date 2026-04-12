@@ -9,3 +9,8 @@ name = "Informal"
 [[lean_lib]]
 name = "Test"
 globs = ["Test.+"]
+
+[[lean_exe]]
+name = "tfb_skeleton"
+root = "TFBSkeleton"
+supportInterpreter = true
