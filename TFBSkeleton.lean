@@ -11,22 +11,14 @@ Example:
 -/
 import Informal
 
-open Lean Informal.EmitStandalone
+open Lean Informal.EmitStandalone Informal.Cli
 
 unsafe def main (args : List String) : IO Unit := do
   match args with
   | [root, target, output] =>
-    initSearchPath (← findSysroot)
-    enableInitializersExecution
     let rootName := root.toName
     let targetName := target.toName
-    -- Import the project module.
-    -- `loadExts := true` is critical: without it, parser extensions (notation like +, ⋙,
-    -- scoped syntax, etc.) are not loaded, causing `IO.processCommands` to produce
-    -- truncated Syntax trees with wrong `getTailPos?` positions.
-    -- Discovered via Test/ExeVsElab.lean: the elab command path gets extensions
-    -- automatically from `import`, but `importModules` defaults to `loadExts := false`.
-    let env ← importModules (loadExts := true) #[{ module := rootName }] {} (trustLevel := 1024)
+    let env ← loadProjectEnv rootName
     emitStandalone env rootName targetName output
   | _ =>
     IO.eprintln "Usage: lake exe tfb_skeleton <rootPrefix> <targetDecl> <outputPath>"
