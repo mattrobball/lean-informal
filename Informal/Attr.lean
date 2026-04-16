@@ -33,6 +33,16 @@ theorem deformed : ... := ...
 
 The first argument is the paper reference (free-form string).
 The optional second argument is a brief comment or gloss.
+An optional trailing `complete` or `incomplete` keyword sets the
+formalization status; omitting it defaults to `incomplete`.
+
+```
+@[informal "Theorem 7.1" complete]
+theorem deformed : ... := ...
+
+@[informal "Proposition 5.3" "forward direction only"]
+theorem heartEquiv_forward ...
+```
 
 Multiple declarations may reference the same paper statement:
 
@@ -51,6 +61,15 @@ open Lean Elab
 
 namespace Informal
 
+/-- Formalization status of a declaration relative to its paper statement. -/
+inductive DeclStatus where
+  | complete
+  | incomplete
+  deriving BEq, Repr, Inhabited, Hashable
+
+instance : ToString DeclStatus where
+  toString | .complete => "complete" | .incomplete => "incomplete"
+
 /-- An informal paper reference entry stored in the environment.
 Includes a snapshot of the declaration's content hash and dependency hashes
 at the time the tag was applied, for drift detection. -/
@@ -61,6 +80,8 @@ structure Entry where
   paperRef : String
   /-- Optional comment or gloss. -/
   comment : String := ""
+  /-- Formalization status: `incomplete` (default) or `complete`. -/
+  status : DeclStatus := .incomplete
   /-- Hash of the declaration's type (and body for data-carrying declarations)
       at the time the tag was applied. -/
   contentHash : UInt64 := 0
@@ -128,15 +149,24 @@ def computeDepHashes (env : Environment) (name : Name) (ci : ConstantInfo)
   return result
 
 /-- The `@[informal]` attribute syntax. -/
-syntax (name := informal) "informal" str (ppSpace str)? : attr
+declare_syntax_cat informalStatus
+syntax "complete" : informalStatus
+syntax "incomplete" : informalStatus
+
+syntax (name := informal) "informal" str (ppSpace str)? (ppSpace informalStatus)? : attr
 
 initialize Lean.registerBuiltinAttribute {
   name := `informal
   descr := "Tag a declaration with a paper reference and record a content snapshot."
   add := fun decl stx _attrKind => do
-    let (paperRef, comment) ← match stx with
-      | `(attr| informal $ref $[$cmt]?) =>
-        pure (ref.getString, (cmt.map (·.getString)).getD "")
+    let (paperRef, comment, status) ← match stx with
+      | `(attr| informal $ref $[$cmt]? $[$st:informalStatus]?) => do
+        let s : DeclStatus ← match st with
+          | some stx => match stx with
+            | `(informalStatus| complete) => pure .complete
+            | _ => pure .incomplete
+          | none => pure .incomplete
+        pure (ref.getString, (cmt.map (·.getString)).getD "", s)
       | _ => throwUnsupportedSyntax
     let env ← getEnv
     let some ci := env.find? decl
@@ -147,6 +177,7 @@ initialize Lean.registerBuiltinAttribute {
       declName := decl
       paperRef
       comment
+      status
       contentHash
       depHashes
     })

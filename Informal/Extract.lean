@@ -58,10 +58,12 @@ structure DeclEntry where
   declKind : String
   moduleName : String
   docstring : Option String := none
+  signature : Option String := none
   contentHash : UInt64 := 0
   depHashes : Array (String × UInt64) := #[]
   paperRef : Option String := none
   paperComment : Option String := none
+  paperStatus : Option String := none
   sourceFile : Option String := none
   startLine : Option Nat := none
   endLine : Option Nat := none
@@ -73,12 +75,14 @@ instance : ToJson DeclEntry where
     ("declKind", Json.str e.declKind),
     ("moduleName", Json.str e.moduleName),
     ("docstring", match e.docstring with | some d => Json.str d | none => Json.null),
+    ("signature", match e.signature with | some s => Json.str s | none => Json.null),
     ("contentHash", Json.num (Lean.JsonNumber.fromNat e.contentHash.toNat)),
     ("depHashes", if e.depHashes.isEmpty then Json.null
       else Json.arr (e.depHashes.map fun (n, h) =>
         Json.mkObj [("name", Json.str n), ("hash", Json.num (.fromNat h.toNat))])),
     ("paperRef", match e.paperRef with | some r => Json.str r | none => Json.null),
     ("paperComment", match e.paperComment with | some c => Json.str c | none => Json.null),
+    ("paperStatus", match e.paperStatus with | some s => Json.str s | none => Json.null),
     ("sourceFile", match e.sourceFile with | some s => Json.str s | none => Json.null),
     ("startLine", match e.startLine with | some n => Json.num (.fromNat n) | none => Json.null),
     ("endLine", match e.endLine with | some n => Json.num (.fromNat n) | none => Json.null)
@@ -137,11 +141,13 @@ def collectDecls (rootPrefix : Name) : CoreM (Array DeclEntry) := do
       let informal? := informalMap[name]?
       let range? ← findDeclarationRanges? name
       let sourceFile := modName.toString.replace "." "/" ++ ".lean"
+      let sig ← MetaM.run' (ppExpr ci.type)
       let entry : DeclEntry := {
         declName := name.toString
         declKind := toString kind
         moduleName := getModuleName env name
         docstring := doc
+        signature := some (toString sig)
         contentHash := hash
         depHashes := match informal? with
           | some e => e.depHashes.map fun (n, h) => (n.toString, h)
@@ -149,6 +155,7 @@ def collectDecls (rootPrefix : Name) : CoreM (Array DeclEntry) := do
         paperRef := informal?.map (·.paperRef)
         paperComment := informal?.bind fun e =>
           if e.comment.isEmpty then none else some e.comment
+        paperStatus := informal?.map fun e => toString e.status
         sourceFile := some sourceFile
         startLine := range?.map (·.range.pos.line + 1)
         endLine := range?.map (·.range.endPos.line + 1)

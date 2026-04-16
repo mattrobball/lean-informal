@@ -21,6 +21,7 @@ structure InformalExportEntry where
   moduleName : String
   paperRef : String
   comment : String
+  status : String
   contentHash : Nat
   depHashes : Array (String × Nat)
   deriving ToJson, FromJson
@@ -35,6 +36,7 @@ def exportInformalEntries (env : Environment) : Array InformalExportEntry :=
       moduleName
       paperRef := e.paperRef
       comment := e.comment
+      status := toString e.status
       contentHash := e.contentHash.toNat
       depHashes := e.depHashes.map fun (n, h) => (n.toString, h.toNat) }
 
