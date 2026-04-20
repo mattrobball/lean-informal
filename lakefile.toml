@@ -3,6 +3,16 @@ version = "0.1.0"
 keywords = ["documentation", "formalization"]
 description = "Attribute for pairing formal Lean declarations with paper references"
 
+[[require]]
+name = "verso"
+git = "https://github.com/leanprover/verso"
+rev = "v4.29.0"
+
+[[require]]
+name = "subverso"
+git = "https://github.com/leanprover/subverso"
+rev = "main"
+
 [[lean_lib]]
 name = "Informal"
 
