@@ -184,6 +184,56 @@ initialize Lean.registerBuiltinAttribute {
   applicationTime := .afterCompilation
 }
 
+/-- `#informal_external "Paper Ref" := FullyQualifiedName ["comment"] [complete|incomplete]`
+
+    Records a paper-reference entry pointing at an existing Lean
+    declaration (typically mathlib or another upstream library) without
+    requiring a local host decl.  The referenced name must be fully
+    qualified and already in scope — in practice, `import` the module that
+    defines it before the command.
+
+    Examples:
+
+    ```
+    -- A paper statement formalized upstream in mathlib:
+    #informal_external "Definition 3.1" := CategoryTheory.Triangulated.TStructure complete
+
+    -- With a gloss:
+    #informal_external "Proposition 2.4" := CategoryTheory.SomeOtherLib.Foo
+      "HN existence; upstream has a stronger statement"
+    ```
+
+    Equivalent to attaching `@[informal …]` to the target declaration,
+    which isn't possible when the target lives outside the current
+    project.  Dependency hashes are computed against the target's
+    transitive closure so `#check_informal` drift detection continues to
+    work. -/
+syntax (name := informalExternalCmd)
+  "#informal_external " str " := " ident (ppSpace str)? (ppSpace informalStatus)? : command
+
+open Elab Command in
+@[command_elab informalExternalCmd]
+unsafe def elabInformalExternalCmd : CommandElab := fun stx => do
+  match stx with
+  | `(#informal_external $ref:str := $name:ident $[$cmt:str]? $[$st:informalStatus]?) =>
+    let paperRef := ref.getString
+    let comment := (cmt.map TSyntax.getString).getD ""
+    let status : DeclStatus := match st with
+      | some stx => match stx with
+        | `(informalStatus| complete) => .complete
+        | _ => .incomplete
+      | none => .incomplete
+    let declName := name.getId
+    let env ← getEnv
+    let some ci := env.find? declName
+      | throwError "declaration '{declName}' not found in environment"
+    let contentHash := computeHash env declName ci
+    let depHashes := computeDepHashes env declName ci
+    modifyEnv (informalExt.addEntry · {
+      declName, paperRef, comment, status, contentHash, depHashes
+    })
+  | _ => throwUnsupportedSyntax
+
 end Informal
 
 end

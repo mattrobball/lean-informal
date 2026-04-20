@@ -116,13 +116,19 @@ def getModuleName (env : Environment) (name : Name) : String :=
   | none => "unknown"
 
 /-- Walk the environment and collect all user-facing declarations under `rootPrefix`.
-    Includes `@[informal]` data, docstrings, source ranges, and content hashes. -/
+    Includes `@[informal]` data, docstrings, source ranges, and content hashes.
+
+    Also emits a second pass for `#informal_external` entries whose target
+    decls live outside `rootPrefix` (e.g. mathlib).  These are included so
+    downstream tools (the comparison dashboard) can surface upstream-
+    formalized paper references without a local host decl. -/
 def collectDecls (rootPrefix : Name) : CoreM (Array DeclEntry) := do
   let env ← getEnv
   let informalEntries := Informal.getEntries env
   let informalMap : Std.HashMap Name Informal.Entry :=
     informalEntries.foldl (init := {}) fun m e => m.insert e.declName e
   let mut result : Array DeclEntry := #[]
+  let mut emitted : NameSet := {}
   for i in [:env.header.moduleNames.size] do
     let modName := env.header.moduleNames[i]!
     unless rootPrefix.isPrefixOf modName do continue
@@ -161,6 +167,38 @@ def collectDecls (rootPrefix : Name) : CoreM (Array DeclEntry) := do
         endLine := range?.map (·.range.endPos.line + 1)
       }
       result := result.push entry
+      emitted := emitted.insert name
+  -- Second pass: `#informal_external` entries pointing at decls outside
+  -- `rootPrefix`.  These have no local host, so the first pass skipped
+  -- them.  Emit a DeclEntry using the external decl's env metadata
+  -- (moduleName, source file, signature).  Downstream renderers can
+  -- distinguish externals by checking whether the moduleName starts with
+  -- the root prefix.
+  for ie in informalEntries do
+    if emitted.contains ie.declName then continue
+    let some ci := env.find? ie.declName | continue
+    let kind ← classifyDecl env ie.declName ci
+    let hash := computeHash env ie.declName ci
+    let doc ← (Lean.findDocString? env ie.declName : IO _)
+    let range? ← findDeclarationRanges? ie.declName
+    let modName := getModuleName env ie.declName
+    let sourceFile := modName.replace "." "/" ++ ".lean"
+    let sig ← MetaM.run' (ppExpr ci.type)
+    result := result.push {
+      declName := ie.declName.toString
+      declKind := toString kind
+      moduleName := modName
+      docstring := doc
+      signature := some (toString sig)
+      contentHash := hash
+      depHashes := ie.depHashes.map fun (n, h) => (n.toString, h)
+      paperRef := some ie.paperRef
+      paperComment := if ie.comment.isEmpty then none else some ie.comment
+      paperStatus := some (toString ie.status)
+      sourceFile := some sourceFile
+      startLine := range?.map (·.range.pos.line + 1)
+      endLine := range?.map (·.range.endPos.line + 1)
+    }
   return result.qsort fun a b =>
     if a.moduleName == b.moduleName then a.declName < b.declName
     else a.moduleName < b.moduleName
