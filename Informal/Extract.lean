@@ -121,12 +121,22 @@ def getModuleName (env : Environment) (name : Name) : String :=
     Also emits a second pass for `#informal_external` entries whose target
     decls live outside `rootPrefix` (e.g. mathlib).  These are included so
     downstream tools (the comparison dashboard) can surface upstream-
-    formalized paper references without a local host decl. -/
+    formalized paper references without a local host decl.
+
+    A single declaration may carry multiple `@[informal "…"]` tags (one per
+    paper statement it realizes); this function emits one `DeclEntry` per
+    tag, so downstream tools can bind the same Lean decl to multiple paper
+    references.  An untagged declaration emits exactly one entry with a
+    `null` `paperRef`. -/
 def collectDecls (rootPrefix : Name) : CoreM (Array DeclEntry) := do
   let env ← getEnv
   let informalEntries := Informal.getEntries env
-  let informalMap : Std.HashMap Name Informal.Entry :=
-    informalEntries.foldl (init := {}) fun m e => m.insert e.declName e
+  -- Group by declName so each informal tag produces its own DeclEntry.
+  let informalMap : Std.HashMap Name (Array Informal.Entry) :=
+    informalEntries.foldl (init := {}) fun m e =>
+      match m[e.declName]? with
+      | some arr => m.insert e.declName (arr.push e)
+      | none     => m.insert e.declName #[e]
   let mut result : Array DeclEntry := #[]
   let mut emitted : NameSet := {}
   for i in [:env.header.moduleNames.size] do
@@ -144,36 +154,43 @@ def collectDecls (rootPrefix : Name) : CoreM (Array DeclEntry) := do
       let kind ← classifyDecl env name ci
       let hash := computeHash env name ci
       let doc ← (Lean.findDocString? env name : IO _)
-      let informal? := informalMap[name]?
       let range? ← findDeclarationRanges? name
       let sourceFile := modName.toString.replace "." "/" ++ ".lean"
       let sig ← MetaM.run' (ppExpr ci.type)
-      let entry : DeclEntry := {
+      let baseEntry : DeclEntry := {
         declName := name.toString
         declKind := toString kind
         moduleName := getModuleName env name
         docstring := doc
         signature := some (toString sig)
         contentHash := hash
-        depHashes := match informal? with
-          | some e => e.depHashes.map fun (n, h) => (n.toString, h)
-          | none => #[]
-        paperRef := informal?.map (·.paperRef)
-        paperComment := informal?.bind fun e =>
-          if e.comment.isEmpty then none else some e.comment
-        paperStatus := informal?.map fun e => toString e.status
+        depHashes := #[]
+        paperRef := none
+        paperComment := none
+        paperStatus := none
         sourceFile := some sourceFile
         startLine := range?.map (·.range.pos.line + 1)
         endLine := range?.map (·.range.endPos.line + 1)
       }
-      result := result.push entry
+      match informalMap[name]? with
+      | none =>
+        result := result.push baseEntry
+      | some tags =>
+        for e in tags do
+          result := result.push { baseEntry with
+            depHashes := e.depHashes.map fun (n, h) => (n.toString, h)
+            paperRef := some e.paperRef
+            paperComment := if e.comment.isEmpty then none else some e.comment
+            paperStatus := some (toString e.status)
+          }
       emitted := emitted.insert name
   -- Second pass: `#informal_external` entries pointing at decls outside
   -- `rootPrefix`.  These have no local host, so the first pass skipped
   -- them.  Emit a DeclEntry using the external decl's env metadata
   -- (moduleName, source file, signature).  Downstream renderers can
   -- distinguish externals by checking whether the moduleName starts with
-  -- the root prefix.
+  -- the root prefix.  The iteration is per-entry, so multiple tags on the
+  -- same external decl naturally yield one entry each.
   for ie in informalEntries do
     if emitted.contains ie.declName then continue
     let some ci := env.find? ie.declName | continue
@@ -200,7 +217,10 @@ def collectDecls (rootPrefix : Name) : CoreM (Array DeclEntry) := do
       endLine := range?.map (·.range.endPos.line + 1)
     }
   return result.qsort fun a b =>
-    if a.moduleName == b.moduleName then a.declName < b.declName
+    if a.moduleName == b.moduleName then
+      if a.declName == b.declName then
+        (a.paperRef.getD "") < (b.paperRef.getD "")
+      else a.declName < b.declName
     else a.moduleName < b.moduleName
 
 /-- `#extract_decls rootPrefix "path.json"` — extract all declarations under `rootPrefix`
