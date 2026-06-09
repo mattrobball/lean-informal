@@ -9,6 +9,7 @@ Example:
   lake exe extract_decls BridgelandStability extracted.json
 -/
 import Informal
+import InformalVerso.Extract
 
 open Lean Informal.Cli
 

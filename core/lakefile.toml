@@ -1,0 +1,11 @@
+name = "informal-core"
+version = "0.1.0"
+keywords = ["documentation", "formalization"]
+description = "Verso-free core: attribute for pairing formal Lean declarations with paper references, plus dependency/classification/export tooling. Depends only on Lean."
+
+# No requires: this package pulls nothing beyond Lean itself.
+# (No verso / subverso / md4lean.)
+
+[[lean_lib]]
+name = "Informal"
+globs = ["Informal", "Informal.Attr", "Informal.Classify", "Informal.Cli", "Informal.Deps", "Informal.Export"]

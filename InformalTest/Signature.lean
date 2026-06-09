@@ -1,7 +1,8 @@
 /-
 Test: signature and paperStatus fields in extractor output.
 -/
-import Test.Signature.Defs
+import InformalTest.Signature.Defs
+import InformalVerso.Extract
 
 open Lean Elab Command Meta Informal
 

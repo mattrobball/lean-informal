@@ -10,6 +10,7 @@ Example:
     artifacts/trusted_base.lean
 -/
 import Informal
+import InformalVerso.EmitStandalone
 
 open Lean Informal.EmitStandalone Informal.Cli
 

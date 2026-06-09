@@ -3,6 +3,7 @@ Test: verify empty section stripping for named and anonymous sections,
 including noncomputableSection entries.
 -/
 import Informal
+import InformalVerso.EmitStandalone
 
 open Lean Informal.EmitStandalone
 

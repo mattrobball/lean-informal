@@ -1,7 +1,14 @@
-name = "informal"
+name = "informal-verso"
 version = "0.1.0"
 keywords = ["documentation", "formalization"]
-description = "Attribute for pairing formal Lean declarations with paper references"
+description = "Verso rendering layer for the `informal` paper-reference tooling. Depends on the verso-free `informal-core` package plus verso/subverso."
+
+# Verso-free core (the 5 pure-Lean modules + the `Informal` root). Pulls nothing
+# beyond Lean. Downstream projects that do not need Verso should `require` this
+# package directly instead of `informal-verso`.
+[[require]]
+name = "informal-core"
+path = "core"
 
 [[require]]
 name = "verso"
@@ -13,12 +20,24 @@ name = "subverso"
 git = "https://github.com/leanprover/subverso"
 rev = "main"
 
+# Verso rendering layer. The `InformalVerso` root re-exports core (`import
+# Informal`) plus the verso-layer/tooling submodules that live in this package
+# rather than in core. These modules keep their original internal namespaces
+# (`Informal.VersoBlock`, `Informal.EmitStandalone`) but use the `InformalVerso.*`
+# module path so they do not collide with core's `Informal` lib namespace:
+#   InformalVerso.VersoBlock     — Verso code-block expanders (needs verso + subverso)
+#   InformalVerso.Extract        — JSON declaration extraction (verso-free, kept here as tooling)
+#   InformalVerso.EmitStandalone — standalone TFB file generator (verso-free, kept here as tooling)
 [[lean_lib]]
-name = "Informal"
+name = "InformalVerso"
+globs = ["InformalVerso", "InformalVerso.+"]
 
+# Local test/example modules. Named `InformalTest.*` rather than `Test.*` so
+# they do not collide with the `Test` lib that the `plausible` package (a
+# transitive verso dependency) also declares.
 [[lean_lib]]
-name = "Test"
-globs = ["Test.+"]
+name = "InformalTest"
+globs = ["InformalTest.+"]
 
 [[lean_exe]]
 name = "tfb_skeleton"
