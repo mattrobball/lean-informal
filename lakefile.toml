@@ -3,15 +3,21 @@ version = "0.1.0"
 keywords = ["documentation", "formalization"]
 description = "Attribute for pairing formal Lean declarations with paper references"
 
+# verso tags track Lean minor versions, so v4.32.0 is the tag for the whole
+# v4.32.x line -- there is no v4.32.1. Lake builds every dependency with the
+# ROOT toolchain (lean-toolchain here), so both of these compile under
+# v4.32.1 regardless of the toolchain files in their own tags.
 [[require]]
 name = "verso"
 git = "https://github.com/leanprover/verso"
-rev = "v4.29.0"
+rev = "v4.32.0"
 
+# Pinned rather than left on main: main currently pins v4.29.0-rc7, which is
+# what held this package back on 4.29.
 [[require]]
 name = "subverso"
 git = "https://github.com/leanprover/subverso"
-rev = "main"
+rev = "verso-v4.32.0"
 
 [[lean_lib]]
 name = "Informal"
