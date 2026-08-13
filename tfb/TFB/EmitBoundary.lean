@@ -48,15 +48,35 @@ def inBoundary (roots : Array Name) (mod : Name) : Bool :=
 def matchingRoot? (roots : Array Name) (mod : Name) : Option Name :=
   roots.find? (·.isPrefixOf mod)
 
+/-- Directories that could be a package root, to `depth` levels below `base`.
+
+    A `require` with `subDir` clones the whole repository into
+    `.lake/packages/<pkg>/` and the Lean package sits at `<subDir>` inside
+    it, so the sources are not directly under the package directory. Rather
+    than parse manifests for the subDir, look a couple of levels down. -/
+partial def packageRoots (base : System.FilePath) (depth : Nat) : IO (Array System.FilePath) := do
+  let mut out : Array System.FilePath := #[base]
+  if depth == 0 then return out
+  for entry in ← base.readDir do
+    if (← entry.path.isDir) then
+      -- `.lake` and `.git` hold build output and history, never sources.
+      let name := entry.fileName
+      unless name.startsWith "." do
+        out := out ++ (← packageRoots entry.path (depth - 1))
+  return out
+
 /-- Candidate source paths for a module, in search order: the root project
-    first, then each package under `.lake/packages/`. -/
+    first, then each package under `.lake/packages/` and its plausible
+    subdirectory roots. -/
 def sourceCandidates (modName : Name) : IO (Array System.FilePath) := do
   let rel := System.FilePath.mk (modName.toString.replace "." "/" ++ ".lean")
   let mut out : Array System.FilePath := #[rel]
   let pkgRoot : System.FilePath := ".lake/packages"
   if ← pkgRoot.pathExists then
     for entry in ← pkgRoot.readDir do
-      out := out.push (entry.path / rel)
+      if (← entry.path.isDir) then
+        for root in ← packageRoots entry.path 2 do
+          out := out.push (root / rel)
   return out
 
 /-- Locate a module's source file. Returns `none` if nothing matches, which
