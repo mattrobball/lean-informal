@@ -24,12 +24,32 @@ open Lean
 
 namespace TFB
 
+/-- Is this a proof auxiliary that elaboration lifted out of a definition?
+
+    A proof term is abstracted into its own constant as soon as it contains a
+    nested proof argument: `exB (exA n)` becomes `foo._proof_1`, while the
+    atomic `exA n` stays inline. Identical on v4.29.1, v4.31.0 and v4.32.1. -/
+def isLiftedProof : Name → Bool
+  | .str _ s => s.startsWith "_proof"
+  | _ => false
+
 /-- One-level used constants for a `ConstantInfo`.
-When `proofIrrelevant` is true, skips theorem values.
+When `proofIrrelevant` is true, skips theorem values -- EXCEPT for lifted
+proof auxiliaries, whose values are always followed.
+
+A user theorem's proof can be skipped: the emitter replaces it with `sorry`.
+A lifted auxiliary cannot. It is a fragment of a definition whose source is
+emitted verbatim, and that source names the constants it was abstracted
+from, so skipping its value drops names the emitted file still references.
+Restricted to `_proof` by name rather than to every auxiliary: Mathlib is
+full of constants that resolve to a parent, and following all of them walks
+its entire proof DAG.
+
 Exhaustive on all `ConstantInfo` constructors. -/
 def usedConstants (ci : ConstantInfo) (proofIrrelevant : Bool := true) : NameSet :=
   ci.type.getUsedConstantsAsSet ++ match ci with
-  | .thmInfo v    => if proofIrrelevant then {} else v.value.getUsedConstantsAsSet
+  | .thmInfo v    =>
+      if proofIrrelevant && !isLiftedProof ci.name then {} else v.value.getUsedConstantsAsSet
   | .defnInfo v   => v.value.getUsedConstantsAsSet
   | .opaqueInfo v => v.value.getUsedConstantsAsSet
   | .inductInfo v => .ofList v.ctors

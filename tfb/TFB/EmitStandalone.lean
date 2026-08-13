@@ -156,7 +156,13 @@ def isContextCmd (stx : Syntax) : Bool :=
   k == ``Parser.Command.variable ||
   k == ``Parser.Command.«section» ||
   k == ``Parser.Command.set_option ||
-  k == ``Parser.Command.universe
+  k == ``Parser.Command.universe ||
+  -- `attribute` is context, not a declaration. Dropping it silently changes
+  -- what the emitted file means: `attribute [local instance]
+  -- MvPolynomial.gradedAlgebra` is the only reason `CommRing` can be
+  -- synthesised for a homogeneous localization, so without it every
+  -- declaration built on that chart fails to elaborate.
+  k == ``Parser.Command.attribute
 
 def findDeclRanges? (env : Environment) (name : Name) : Option DeclarationRanges :=
   declRangeExt.find? (level := .exported) env name <|>
@@ -236,23 +242,33 @@ def coreContextSignature (entries : Array CommandEntry) : Array SyntaxNodeKind :
     | _ => pure ()
   sig
 
-/-- Remove empty section/end pairs from entries. A section is empty if it
-    contains no TFB declarations between its `section` and `end` entries —
-    only variable/context commands. Uses Syntax kinds, not string parsing. -/
+/-- Is this command one that opens a block closed by `end`? -/
+private def isBlockOpener (kind : SyntaxNodeKind) : Bool :=
+  kind == ``Parser.Command.«section» || kind == ``Parser.Command.namespace
+
+/-- Remove empty block/end pairs from entries. A block is empty if it contains
+    no TFB declarations between its `section`/`namespace` and its `end` — only
+    variable/context commands. Uses Syntax kinds, not string parsing.
+
+    `namespace` counts as a block opener, not just `section`. An emitted module
+    routinely contains namespaces none of whose declarations made the closure,
+    and such a namespace carries its `variable` bindings with it. Those
+    bindings mention the very types that were excluded, so leaving the block in
+    emits references to declarations that are not in the file. -/
 def stripEmptySections (entries : Array CommandEntry) : Array CommandEntry := Id.run do
   let mut result : Array CommandEntry := #[]
   let mut i := 0
   while i < entries.size do
     let e := entries[i]!
-    if e.kind == ``Parser.Command.«section» then
-      -- Scan ahead tracking nesting depth. An empty section has no TFB decls
+    if isBlockOpener e.kind then
+      -- Scan ahead tracking nesting depth. An empty block has no TFB decls
       -- at any nesting level before its matching end.
       let mut j := i + 1
       let mut hasTFBInside := false
-      let mut depth := 1  -- we're inside one section
+      let mut depth := 1  -- we're inside one block
       while j < entries.size && depth > 0 do
         let ej := entries[j]!
-        if ej.kind == ``Parser.Command.«section» then
+        if isBlockOpener ej.kind then
           depth := depth + 1
         else if ej.kind == ``Parser.Command.«end» then
           depth := depth - 1

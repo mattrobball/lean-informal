@@ -98,25 +98,50 @@ def computeBoundaryNames (env : Environment) (roots : Array Name) (targetName : 
     (importedEnv? : Option Environment := none) : Except String (Std.HashSet Name) := do
   let some ci := env.find? targetName
     | .error s!"Target declaration '{targetName}' not found in environment"
-  -- Pass `roots` through. Left to itself collectDeps derives one project
-  -- root from the target's OWN module and keeps only constants sharing it,
-  -- so a target stated in a challenge module -- whose dependencies all live
-  -- under a different root -- yields a closure containing just the target.
-  let rawDeps := collectDeps env targetName ci (proofIrrelevant := true) (roots := roots)
-  let mut result : Std.HashSet Name := {}
-  result := result.insert targetName
-  for dep in rawDeps.toArray do
-    let resolved := resolveToUser env dep
-    if let some impEnv := importedEnv? then
-      if impEnv.contains resolved then continue
+  let keep (resolved : Name) (isPriv : Bool) : Bool :=
     match env.getModuleIdxFor? resolved with
     | some idx =>
       let modName := env.header.moduleNames[idx.toNat]!
-      if inBoundary roots modName
-          && !excludePrefixes.any (·.isPrefixOf modName)
-          && (classifyNonUser env resolved).isNone then
-        result := result.insert resolved
-    | none => pure ()
+      inBoundary roots modName
+        && !excludePrefixes.any (·.isPrefixOf modName)
+        && (isPriv || (classifyNonUser env resolved).isNone)
+    | none => false
+  let skipImported (resolved : Name) : Bool :=
+    match importedEnv? with
+    | some impEnv => impEnv.contains resolved
+    | none => false
+  let rawDeps := collectDeps env targetName ci (proofIrrelevant := true) (roots := roots)
+  let mut result : Std.HashSet Name := {}
+  result := result.insert targetName
+  -- Parents that entered the set only by promotion, so were never walked.
+  let mut promoted : Array Name := #[]
+  for dep in rawDeps.toArray do
+    -- Private declarations keep their INTERNAL name: `classifyNonUser` calls
+    -- anything `_`-prefixed internal, right for compiler artifacts and wrong
+    -- for `private abbrev k`, a real declaration the emitted source names.
+    -- Dropping it leaves `k` unbound, autoImplicit invents a variable, and
+    -- the failure surfaces as `Semiring k` rather than a missing identifier.
+    let isPriv := isPrivateName dep
+    let resolved := if isPriv then dep else resolveToUser env dep
+    if skipImported resolved then continue
+    if keep resolved isPriv then
+      result := result.insert resolved
+      -- `resolveToUser` promotes an auxiliary to its parent, so a declaration
+      -- can be emitted that the walk never visited: only
+      -- `instFintypeCircle1._proof_1` is reached, it resolves to
+      -- `instFintypeCircle1`, and the instance is emitted while `Circle1`,
+      -- which its type names, was never collected. Promotion adds a
+      -- declaration to the output, so its dependencies have to come too.
+      if resolved != dep && !rawDeps.contains resolved then
+        promoted := promoted.push resolved
+  -- One extra walk per promoted parent -- a handful, not per closure member.
+  for p in promoted do
+    if let some pci := env.find? p then
+      for dep in (collectDeps env p pci (proofIrrelevant := true) (roots := roots)).toArray do
+        let isPriv := isPrivateName dep
+        let resolved := if isPriv then dep else resolveToUser env dep
+        if !skipImported resolved && keep resolved isPriv then
+          result := result.insert resolved
   if let some impEnv := importedEnv? then
     if impEnv.contains targetName then
       result := result.erase targetName
@@ -178,22 +203,39 @@ def emitBoundary (env : Environment) (roots : Array Name) (targetName : Name)
     let entries ← processFile source env rangeMap filePath.toString
     allModules := allModules.push { modName, entries := stripEmptySections entries }
 
-  -- Header: import only what is outside the boundary.
-  let mut output := ""
-  let mut emittedImports : Std.HashSet Name := {}
-  let mut importSources : Array Name := orderedModules.push targetModName
+  -- Mathlib wholesale, then every non-Mathlib external import by name.
+  --
+  -- Naming the individual Mathlib modules used is not worth the risk: the
+  -- imports have to be harvested from somewhere, and harvesting from the
+  -- modules that contributed declarations misses any module that contributes
+  -- none yet is the sole route by which an import arrives.
+  -- V14Formalization.Basic is exactly that -- Definitions uses
+  -- `Representation` without importing it, getting it via Basic -- and the
+  -- emitted file then fails to elaborate. Mathlib is trusted as given
+  -- either way, so importing all of it costs only load time.
+  --
+  -- Non-Mathlib externals still have to be named, and for those the source
+  -- is every in-boundary module in the environment, not just the ones that
+  -- contributed declarations, for the same completeness reason.
+  let mut output := "import Mathlib\n"
+  let mut emitted : Std.HashSet Name := {}
+  let mut importSources : Array Name := #[]
+  for modName in env.header.moduleNames do
+    if inBoundary roots modName then
+      importSources := importSources.push modName
+  importSources := importSources.push targetModName
   for modName in importSources do
     match env.getModuleIdx? modName with
     | some idx =>
       for imp in env.header.moduleData[idx.toNat]!.imports.map Import.module do
         if imp != `Init && !inBoundary roots imp
-            && !((`Informal).isPrefixOf imp) && !((`TFB).isPrefixOf imp) && !((`ProblemExtraction).isPrefixOf imp)
-            && !emittedImports.contains imp then
-          emittedImports := emittedImports.insert imp
+            && imp.getRoot != `Mathlib
+            && !((`Informal).isPrefixOf imp) && !((`TFB).isPrefixOf imp)
+            && !((`ProblemExtraction).isPrefixOf imp)
+            && !emitted.contains imp then
+          emitted := emitted.insert imp
           output := output ++ s!"import {imp}\n"
     | none => pure ()
-  if emittedImports.isEmpty then
-    output := output ++ "import Mathlib\n"
   output := output ++ "\n"
 
   let mut universeNames : Array String := #[]
@@ -232,6 +274,42 @@ def emitBoundary (env : Environment) (roots : Array Name) (targetName : Name)
       | .context =>
         if e.kind == ``Parser.Command.universe then continue
         if e.kind == ``Parser.Command.set_option then continue
+        -- `open N` where N is inside the boundary but contributed no
+        -- declaration names a namespace that does not exist in the emitted
+        -- file, which Lean rejects outright. External opens are always kept:
+        -- their namespaces come in via the imports.
+        -- Same reasoning for `attribute [...] N`: if N is inside the
+        -- boundary but was not emitted, the command names something the file
+        -- does not contain. Re-enabling `attribute` as context is what made
+        -- `attribute [instance] SmoothProjectiveGVariety.ambientAdd` appear
+        -- for a structure that is not in the closure.
+        if e.kind == ``Parser.Command.attribute then
+          let after := (e.src.splitOn "]").getLast!
+          let toks := (after.splitOn " ").filterMap fun t =>
+            let t := t.trim
+            if t.isEmpty then none else some t
+          -- Source writes these relative to the enclosing namespace
+          -- (`SmoothProjectiveGVariety.ambientAdd`) while the closure holds
+          -- them absolute (`V14Formalization.SmoothProjectiveGVariety...`),
+          -- so resolve against each root before deciding. A token that does
+          -- not resolve in-boundary is external -- e.g.
+          -- `MvPolynomial.gradedAlgebra` -- and must be kept.
+          let dead := toks.any fun t => Id.run do
+            let tn := t.toName
+            for r in roots do
+              let cand := r ++ tn
+              if env.contains cand then
+                return !names.contains cand
+            return false
+          if dead then continue
+        if e.kind == ``Parser.Command.open then
+          let toks := (e.src.splitOn " ").filterMap fun t =>
+            let t := t.trim
+            if t.isEmpty || t == "open" then none else some t
+          let dead := toks.any fun t =>
+            let n := t.toName
+            inBoundary roots n && !names.toArray.any (fun d => n.isPrefixOf d)
+          if dead then continue
         if prevWasDecl then output := output ++ "\n"
         output := output ++ e.src ++ "\n"
         prevWasDecl := false
