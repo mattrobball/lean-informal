@@ -78,7 +78,11 @@ def computeBoundaryNames (env : Environment) (roots : Array Name) (targetName : 
     (importedEnv? : Option Environment := none) : Except String (Std.HashSet Name) := do
   let some ci := env.find? targetName
     | .error s!"Target declaration '{targetName}' not found in environment"
-  let rawDeps := collectDeps env targetName ci (proofIrrelevant := true)
+  -- Pass `roots` through. Left to itself collectDeps derives one project
+  -- root from the target's OWN module and keeps only constants sharing it,
+  -- so a target stated in a challenge module -- whose dependencies all live
+  -- under a different root -- yields a closure containing just the target.
+  let rawDeps := collectDeps env targetName ci (proofIrrelevant := true) (roots := roots)
   let mut result : Std.HashSet Name := {}
   result := result.insert targetName
   for dep in rawDeps.toArray do

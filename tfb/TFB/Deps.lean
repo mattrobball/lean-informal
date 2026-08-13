@@ -42,7 +42,7 @@ private structure CollectState where
   visited : NameSet := {}
   deps : NameSet := {}
 
-private abbrev CollectM := ReaderT (Environment × Name × Bool) (StateM CollectState)
+private abbrev CollectM := ReaderT (Environment × Array Name × Bool) (StateM CollectState)
 
 /-- Recursively collect the transitive closure of dependencies.
 Records every project-local constant encountered — no filtering,
@@ -51,29 +51,40 @@ private partial def collect (c : Name) : CollectM Unit := do
   let s ← get
   if s.visited.contains c then return
   modify fun s => { s with visited := s.visited.insert c }
-  let (env, projectRoot, pi) ← read
+  let (env, roots, pi) ← read
   let some ci := env.find? c | return
   match env.getModuleIdxFor? c with
   | some idx =>
-    if env.header.moduleNames[idx.toNat]!.getRoot == projectRoot then
+    if roots.any (·.isPrefixOf env.header.moduleNames[idx.toNat]!) then
       modify fun s => { s with deps := s.deps.insert c }
   | none => pure ()
   (usedConstants ci pi).forM collect
 
 /-- Compute the transitive closure of dependencies for a declaration.
-Returns every project-local constant in the dependency graph.
+Returns every constant in the dependency graph that lives under one of
+`roots`.
 
 When `proofIrrelevant` is true (default), theorem values are skipped
-but their types are still followed. -/
+but their types are still followed.
+
+`roots` defaults to the root of the module holding `name`, which is right
+when the declaration and its dependencies belong to one package. It is wrong
+whenever they do not -- a challenge module stating a theorem about
+definitions from elsewhere, or a project spanning several in-house packages.
+In those cases every dependency has a different module root than the target
+and the closure silently comes back holding only the target itself, so pass
+the roots explicitly. -/
 def collectDeps (env : Environment) (name : Name) (ci : ConstantInfo)
-    (proofIrrelevant : Bool := true) : NameSet := Id.run do
-  let projectRoot := match env.getModuleIdxFor? name with
-    | some idx => env.header.moduleNames[idx.toNat]!.getRoot
-    | none => env.mainModule.getRoot
+    (proofIrrelevant : Bool := true) (roots : Array Name := #[]) : NameSet := Id.run do
+  let roots := if roots.isEmpty then
+      #[match env.getModuleIdxFor? name with
+        | some idx => env.header.moduleNames[idx.toNat]!.getRoot
+        | none => env.mainModule.getRoot]
+    else roots
   let mut s : CollectState := {}
   s := { s with visited := s.visited.insert name }
   (_, s) := ((usedConstants ci proofIrrelevant).forM collect
-    |>.run (env, projectRoot, proofIrrelevant)).run s
+    |>.run (env, roots, proofIrrelevant)).run s
   s.deps
 
 end TFB
