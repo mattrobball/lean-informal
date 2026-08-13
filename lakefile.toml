@@ -35,3 +35,8 @@ supportInterpreter = true
 name = "extract_decls"
 root = "ExtractDecls"
 supportInterpreter = true
+
+[[lean_exe]]
+name = "tfb_boundary"
+root = "TFBBoundary"
+supportInterpreter = true
