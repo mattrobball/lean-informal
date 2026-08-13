@@ -5,8 +5,8 @@ Authors: Matthew Ballard, Formalization
 -/
 module
 
-public meta import Informal.Deps
-public meta import Informal.Classify
+public meta import TFB.Deps
+public meta import TFB.Classify
 public meta import Lean
 
 /-!
@@ -26,9 +26,9 @@ Each command is classified by its Syntax kind and carried as a structured
 
 public meta section
 
-open Lean Elab Command Meta Informal
+open Lean Elab Command Meta TFB
 
-namespace Informal.EmitStandalone
+namespace TFB.EmitStandalone
 
 -- ═══ Phase 1: TFB name computation ═══
 
@@ -384,7 +384,7 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
       let imports := env.header.moduleData[idx.toNat]!.imports.map Import.module
       for imp in imports do
         if imp != `Init && !rootPrefix.isPrefixOf imp
-          && !((`Informal).isPrefixOf imp) && !((`ProblemExtraction).isPrefixOf imp)
+          && !((`Informal).isPrefixOf imp) && !((`TFB).isPrefixOf imp) && !((`ProblemExtraction).isPrefixOf imp)
           && !emittedImports.contains imp then
           emittedImports := emittedImports.insert imp
           output := output ++ s!"import {imp}\n"
@@ -395,7 +395,7 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     let imports := env.header.moduleData[idx.toNat]!.imports.map Import.module
     for imp in imports do
       if imp != `Init && !rootPrefix.isPrefixOf imp
-          && !((`Informal).isPrefixOf imp) && !((`ProblemExtraction).isPrefixOf imp)
+          && !((`Informal).isPrefixOf imp) && !((`TFB).isPrefixOf imp) && !((`ProblemExtraction).isPrefixOf imp)
           && !emittedImports.contains imp then
         emittedImports := emittedImports.insert imp
         output := output ++ s!"import {imp}\n"
@@ -453,10 +453,10 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   IO.FS.writeFile outputPath output
   IO.eprintln s!"Wrote {outputPath}"
 
-end Informal.EmitStandalone
+end TFB.EmitStandalone
 
 elab "#emit_standalone" root:ident target:ident path:str : command => do
   let env ← getEnv
-  Informal.EmitStandalone.emitStandalone env root.getId target.getId path.getString
+  TFB.EmitStandalone.emitStandalone env root.getId target.getId path.getString
 
 end

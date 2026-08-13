@@ -27,9 +27,9 @@ Example:
 Compare `tfb_skeleton`, which takes one root prefix and so imports any other
 in-house package as if it were external.
 -/
-import Informal
+import TFB
 
-open Lean Informal.EmitBoundary Informal.Cli
+open Lean TFB.EmitBoundary TFB.Cli
 
 structure Args where
   roots : Array Name := #[]

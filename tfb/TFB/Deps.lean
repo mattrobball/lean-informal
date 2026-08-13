@@ -22,7 +22,7 @@ public meta section
 
 open Lean
 
-namespace Informal
+namespace TFB
 
 /-- One-level used constants for a `ConstantInfo`.
 When `proofIrrelevant` is true, skips theorem values.
@@ -76,6 +76,6 @@ def collectDeps (env : Environment) (name : Name) (ci : ConstantInfo)
     |>.run (env, projectRoot, proofIrrelevant)).run s
   s.deps
 
-end Informal
+end TFB
 
 end

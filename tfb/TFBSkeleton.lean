@@ -9,9 +9,9 @@ Example:
     CategoryTheory.Triangulated.NumericalStabilityCondition.existsComplexManifoldOnConnectedComponent \
     artifacts/trusted_base.lean
 -/
-import Informal
+import TFB
 
-open Lean Informal.EmitStandalone Informal.Cli
+open Lean TFB.EmitStandalone TFB.Cli
 
 unsafe def main (args : List String) : IO Unit := do
   match args with

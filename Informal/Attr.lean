@@ -6,8 +6,8 @@ Authors: Matthew Ballard
 module
 
 public meta import Lean.Elab.Command
-public meta import Informal.Classify
-public meta import Informal.Deps
+public meta import TFB.Classify
+public meta import TFB.Deps
 
 /-!
 # Informal paper reference attribute
@@ -57,7 +57,7 @@ theorem heartEquiv_reverse ...
 
 public meta section
 
-open Lean Elab
+open Lean Elab TFB
 
 namespace Informal
 

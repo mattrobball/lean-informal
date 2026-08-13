@@ -5,7 +5,7 @@ Authors: Matthew Ballard, Formalization
 -/
 module
 
-public meta import Informal.EmitStandalone
+public meta import TFB.EmitStandalone
 
 /-!
 # Boundary-aware standalone file generator
@@ -35,10 +35,10 @@ re-elaboration, `sorry` injection, assembly -- is reused from
 
 public meta section
 
-open Lean Elab Command Meta Informal
-open Informal.EmitStandalone
+open Lean Elab Command Meta TFB
+open TFB.EmitStandalone
 
-namespace Informal.EmitBoundary
+namespace TFB.EmitBoundary
 
 /-- Is `mod` inside the trust boundary, i.e. under any of `roots`? -/
 def inBoundary (roots : Array Name) (mod : Name) : Bool :=
@@ -163,7 +163,7 @@ def emitBoundary (env : Environment) (roots : Array Name) (targetName : Name)
     | some idx =>
       for imp in env.header.moduleData[idx.toNat]!.imports.map Import.module do
         if imp != `Init && !inBoundary roots imp
-            && !((`Informal).isPrefixOf imp) && !((`ProblemExtraction).isPrefixOf imp)
+            && !((`Informal).isPrefixOf imp) && !((`TFB).isPrefixOf imp) && !((`ProblemExtraction).isPrefixOf imp)
             && !emittedImports.contains imp then
           emittedImports := emittedImports.insert imp
           output := output ++ s!"import {imp}\n"
@@ -230,6 +230,6 @@ def emitBoundary (env : Environment) (roots : Array Name) (targetName : Name)
   unless unresolved.isEmpty do
     IO.eprintln s!"WARNING: {unresolved.size} in-boundary module(s) had no source on disk"
 
-end Informal.EmitBoundary
+end TFB.EmitBoundary
 
 end

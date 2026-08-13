@@ -22,7 +22,7 @@ public meta section
 
 open Lean
 
-namespace Informal.Cli
+namespace TFB.Cli
 
 /-- Load a downstream project's compiled environment by its root module name.
 
@@ -44,6 +44,6 @@ def runCoreM (env : Environment) (action : CoreM α) : IO α := do
   let state : Core.State := { env }
   Prod.fst <$> action.toIO ctx state
 
-end Informal.Cli
+end TFB.Cli
 
 end

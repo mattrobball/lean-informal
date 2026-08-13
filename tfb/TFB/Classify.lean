@@ -22,7 +22,7 @@ public meta section
 
 open Lean Meta
 
-namespace Informal
+namespace TFB
 
 /-- Why a declaration is not user-facing, carrying enough info to resolve to the parent. -/
 inductive NonUserReason where
@@ -149,6 +149,6 @@ def resolveToUser (env : Environment) (name : Name) (fuel : Nat := 8) : Name :=
   | _, none          => name
   | n+1, some reason => resolveToUser env (reason.parent name) n
 
-end Informal
+end TFB
 
 end
