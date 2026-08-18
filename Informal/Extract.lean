@@ -32,7 +32,7 @@ This writes `extracted.json` at elaboration time.
 
 public meta section
 
-open Lean Elab Command Meta Informal TFB
+open Lean Elab Command Meta Informal Stan
 
 /-- Classification of declaration kinds. -/
 inductive DeclKind where

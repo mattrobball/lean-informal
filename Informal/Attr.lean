@@ -57,7 +57,7 @@ theorem heartEquiv_reverse ...
 
 public meta section
 
-open Lean Elab TFB
+open Lean Elab Stan
 
 namespace Informal
 
