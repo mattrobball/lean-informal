@@ -6,8 +6,8 @@ Authors: Matthew Ballard
 module
 
 public meta import Lean.Elab.Command
-public meta import TFB.Classify
-public meta import TFB.Deps
+public meta import Stan.Classify
+public meta import Stan.Deps
 
 /-!
 # Informal paper reference attribute

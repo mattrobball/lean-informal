@@ -19,13 +19,15 @@ name = "subverso"
 git = "https://github.com/leanprover/subverso"
 rev = "verso-v4.32.0"
 
-# The trusted-base emitters and the dependency/classification helpers they
-# share with Attr live here. Split out because they need Lean core only, and
-# a downstream project wanting a trusted-base file should not have to build
-# verso and friends to get one.
+# The standalone-file emitter and the dependency/classification helpers this
+# package shares with it. Split out into its own repository because it needs
+# Lean core only: a downstream project wanting a trusted-base file should not
+# have to build verso and friends to get one, and the emitter should not
+# inherit the toolchain-tied verso pins above.
 [[require]]
-name = "tfb"
-path = "tfb"
+name = "stan"
+git = "https://github.com/mattrobball/lean-stan"
+rev = "main"
 
 [[lean_lib]]
 name = "Informal"

@@ -6,7 +6,7 @@ Authors: Matthew Ballard
 module
 
 public meta import Informal.Attr
-public meta import TFB.Classify
+public meta import Stan.Classify
 public meta import Lean.DocString
 
 /-!

@@ -11,9 +11,9 @@ Example:
 import Informal
 -- `Informal` no longer re-exports the CLI bootstrap: it moved to the `tfb`
 -- package, which depends on Lean core alone.
-import TFB.Cli
+import Stan.Cli
 
-open Lean TFB.Cli
+open Lean Stan.Cli
 
 unsafe def main (args : List String) : IO Unit := do
   match args with
