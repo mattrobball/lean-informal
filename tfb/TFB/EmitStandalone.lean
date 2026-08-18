@@ -172,6 +172,7 @@ def findDeclRanges? (env : Environment) (name : Name) : Option DeclarationRanges
     extract source with sorry injection. Returns structured entries. -/
 def processFile (source : String) (projectEnv : Environment)
     (tfbRangeMap : Std.HashMap String.Pos.Raw Name)
+    (declPositions : Array String.Pos.Raw)
     (filePath : String) : IO (Array CommandEntry) := do
   let inputCtx := Parser.mkInputContext source filePath
   let (_, parserState, messages) ← Parser.parseHeader inputCtx
@@ -215,10 +216,16 @@ def processFile (source : String) (projectEnv : Environment)
       else
         entries := entries.push { cls := .tfbDecl false, src := cmdSrc, kind := topKind }
     | none =>
-      if isContextCmd stx then
-        entries := entries.push { cls := .context, src := cmdSrc, kind := topKind }
-      else
+      -- Denylist, not allowlist: drop non-TFB declarations, keep everything else.
+      -- "Is this a declaration?" is answered by the environment, not by syntax
+      -- kinds: `lemma` is a macro, so its kind is not `Parser.Command.declaration`,
+      -- and the same is true of any user-defined declaration command. A command
+      -- declares something iff some constant's `declRange` lies inside its span.
+      let declaresSomething := declPositions.any fun pos => pos >= cmdStart && pos < cmdEnd
+      if declaresSomething then
         entries := entries.push { cls := .skip, src := cmdSrc, kind := topKind }
+      else
+        entries := entries.push { cls := .context, src := cmdSrc, kind := topKind }
   return entries
 
 -- ═══ Phase 4: Assembly ═══
@@ -245,6 +252,21 @@ def coreContextSignature (entries : Array CommandEntry) : Array SyntaxNodeKind :
 /-- Is this command one that opens a block closed by `end`? -/
 private def isBlockOpener (kind : SyntaxNodeKind) : Bool :=
   kind == ``Parser.Command.«section» || kind == ``Parser.Command.namespace
+
+/-- Whitespace-delimited tokens of `s`. -/
+private def tokens (s : String) : List String :=
+  ((((s.replace "\n" " ").replace "\t" " ").replace "\r" " ").splitOn " "
+    ).filter (· != "")
+
+/-- The identifier a block opener introduces, if any. `namespace Foo` and
+`section Foo` are closed by `end Foo`; a bare `section` by `end`.
+Scans for the keyword rather than assuming it starts the command: openers carry
+modifiers (`noncomputable section`, `public section`) and attributes. -/
+private def blockOpenerName (kind : SyntaxNodeKind) (src : String) : Option String :=
+  let kw := if kind == ``Parser.Command.namespace then "namespace" else "section"
+  match (tokens src).dropWhile (· != kw) with
+  | _ :: name :: _ => some name
+  | _ => none
 
 /-- Remove empty block/end pairs from entries. A block is empty if it contains
     no TFB declarations between its `section`/`namespace` and its `end` — only
@@ -333,6 +355,18 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   let orderedModules := (modIdxPairs.qsort fun a b => a.2 < b.2).map (·.1)
   IO.eprintln s!"Emitting from {orderedModules.size} modules"
 
+  -- Index every non-internal declaration by the module that declares it. Built
+  -- once: this is the input to the "is this command a declaration?" test.
+  -- No `isInternal` filter: private declarations carry mangled names, and if
+  -- they are not in this index their commands are not recognised as
+  -- declarations and leak into the skeleton as context.
+  let mut namesByModule : Std.HashMap Name (Array Name) := {}
+  for (n, _) in env.constants.toList do
+    if let some idx := env.getModuleIdxFor? n then
+      let m := env.header.moduleNames[idx.toNat]!
+      if moduleSet.contains m then
+        namesByModule := namesByModule.insert m ((namesByModule.getD m #[]).push n)
+
   -- Phase 3: Build tfbRangeMap per module and process each file
   let mut allModules : Array ModuleContent := #[]
   for modName in orderedModules do
@@ -346,8 +380,14 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
           if let some ranges := findDeclRanges? env name then
             let bytePos := fileMap.ofPosition ranges.range.pos
             tfbRangeMap := tfbRangeMap.insert bytePos name
+    -- Every declaration in this module, TFB or not, so that a command can be
+    -- recognised as a declaration regardless of which command defined it.
+    let mut declPositions : Array String.Pos.Raw := #[]
+    for name in (namesByModule.getD modName #[]) do
+      if let some ranges := findDeclRanges? env name then
+        declPositions := declPositions.push (fileMap.ofPosition ranges.range.pos)
     IO.eprintln s!"  {filePath} ({tfbRangeMap.size} TFB decls)"
-    let entries ← processFile source env tfbRangeMap filePath
+    let entries ← processFile source env tfbRangeMap declPositions filePath
     -- Debug: dump section-related entries
     allModules := allModules.push { modName, entries := stripEmptySections entries }
 
@@ -357,7 +397,6 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   let tfbModules := allModules.filter fun mc =>
     mc.entries.any fun e => match e.cls with | .tfbDecl _ => true | _ => false
   let numTFBModules := tfbModules.size
-  let mut universeNames : Array String := #[]
   let mut setOptionCounts : Std.HashMap String Nat := {}
   let mut openCounts : Std.HashMap String Nat := {}
   let mut noncompCount : Nat := 0
@@ -368,11 +407,6 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     for e in mc.entries do
       match e.cls with
       | .context =>
-        if e.kind == ``Parser.Command.universe then
-          for word in e.src.splitOn " " do
-            let w := word.trimAsciiEnd.toString
-            if w != "universe" && !w.isEmpty && !universeNames.contains w then
-              universeNames := universeNames.push w
         if e.kind == ``Parser.Command.set_option && !seenOpts.contains e.src then
           seenOpts := seenOpts.insert e.src
           setOptionCounts := setOptionCounts.insert e.src ((setOptionCounts.getD e.src 0) + 1)
@@ -391,7 +425,20 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   -- Emit header — import only external dependencies (e.g., Mathlib).
   -- Project-local modules are NOT imported; their TFB declarations are emitted.
   -- This ensures the standalone file shows all trusted declarations explicitly.
+  -- `module` and the import list live in the module *header*, which is consumed
+  -- by `parseHeader` and never reaches the command stream -- so unlike every
+  -- other command it cannot be preserved by passing commands through. It has to
+  -- be reconstructed. Dropping it is not cosmetic: outside a module-system file
+  -- reducibility hints are computed over a different environment view, so the
+  -- same definition with the same value and the same dependency heights is
+  -- recorded with a different `ReducibilityHints.regular` height.
+  let sourceIsModule : Bool := Id.run do
+    let some idx := env.getModuleIdx? targetModName | return false
+    return env.header.moduleData[idx.toNat]!.isModule
   let mut output := ""
+  if sourceIsModule then
+    output := output ++ "module\n\n"
+  let importKw := if sourceIsModule then "public import" else "import"
   let mut emittedImports : Std.HashSet Name := {}
   -- Collect all imports from TFB modules that are external (not under rootPrefix)
   for modName in orderedModules do
@@ -403,7 +450,7 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
           && !((`Informal).isPrefixOf imp) && !((`TFB).isPrefixOf imp) && !((`ProblemExtraction).isPrefixOf imp)
           && !emittedImports.contains imp then
           emittedImports := emittedImports.insert imp
-          output := output ++ s!"import {imp}\n"
+          output := output ++ s!"{importKw} {imp}\n"
     | none => pure ()
   -- Also import direct imports of the target module that are external
   match env.getModuleIdx? targetModName with
@@ -414,10 +461,10 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
           && !((`Informal).isPrefixOf imp) && !((`TFB).isPrefixOf imp) && !((`ProblemExtraction).isPrefixOf imp)
           && !emittedImports.contains imp then
         emittedImports := emittedImports.insert imp
-        output := output ++ s!"import {imp}\n"
+        output := output ++ s!"{importKw} {imp}\n"
   | none => pure ()
   if emittedImports.isEmpty then
-    output := output ++ "import Mathlib\n"
+    output := output ++ s!"{importKw} Mathlib\n"
   output := output ++ "\n"
   output := output ++ "/-! # Trusted Formalization Base\n"
   output := output ++ s!"{rootPrefix} — `{targetName}`\n"
@@ -427,8 +474,6 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
   -- set_options are stripped entirely — they're project-specific and unnecessary
   -- for the standalone skeleton.
   output := output ++ "\n"
-  unless universeNames.isEmpty do
-    output := output ++ "universe " ++ " ".intercalate universeNames.toList ++ "\n\n"
 
   -- Emit modules. Each module emits context + TFB declarations in source order.
   -- Hoisted set_options and universes are skipped. Spacing between sections.
@@ -437,12 +482,37 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
     if !hasTFB then continue
     let shortName := mc.modName.toString.drop (rootPrefix.toString.length + 1)
     output := output ++ s!"-- ═══ {shortName} ═══\n\n"
+    -- Wrap each module in its own section and emit that module's `universe`
+    -- command in place, rather than hoisting one union of universe names to the
+    -- top of the file.
+    --
+    -- A declaration's `levelParams` are ordered by the enclosing `universe`
+    -- command, restricted to the universes it uses. Modules legitimately differ
+    -- here -- one may open `universe u v`, another `universe w v u` -- so no
+    -- single hoisted line can reproduce every module's order. Hoisting silently
+    -- permutes the universe parameters of the emitted declarations. The types
+    -- still match up to renaming, so this is invisible to any check that
+    -- compares types modulo universes, but Comparator compares statements
+    -- exactly and rejects the skeleton.
+    --
+    -- The wrapper is required, not cosmetic: source files routinely declare
+    -- `universe` at file scope with nothing enclosing it, and a file-scope
+    -- `universe` in the concatenated output would collide with the next
+    -- module's.
+    output := output ++ "section\n"
+    -- Openers this module leaves unclosed, outermost first. Source files
+    -- commonly leave `noncomputable section` open to EOF, which is harmless in
+    -- isolation but leaks across module boundaries once concatenated -- and
+    -- would let one module's universes escape into the next.
+    let mut openBlocks : Array (Option String) := #[]
     let mut prevWasDecl := false
     for e in mc.entries do
       match e.cls with
       | .context =>
-        if e.kind == ``Parser.Command.universe then continue
-        if e.kind == ``Parser.Command.set_option then continue
+        if isBlockOpener e.kind then
+          openBlocks := openBlocks.push (blockOpenerName e.kind e.src)
+        else if e.kind == ``Parser.Command.«end» then
+          openBlocks := openBlocks.pop
         -- Add blank line before context that follows a declaration
         if prevWasDecl then output := output ++ "\n"
         output := output ++ e.src ++ "\n"
@@ -453,15 +523,21 @@ def emitStandalone (env : Environment) (rootPrefix : Name) (targetName : Name)
         output := output ++ e.src ++ "\n"
         prevWasDecl := true
       | .skip => pure ()
+    -- Close what the module left open, innermost first, then the wrapper.
+    for closer in openBlocks.reverse do
+      output := output ++ (match closer with | some n => s!"end {n}\n" | none => "end\n")
+    output := output ++ "end\n"
     output := output ++ "\n"
 
-  -- Strip @[informal]/@[expose] from output (these attributes require importing Informal).
+  -- Strip `@[informal]` from output: it is the one attribute that requires
+  -- importing `Informal`. `@[expose]` is core module-system syntax and must be
+  -- preserved -- it changes how declarations are recorded.
   -- We identify them by string prefix since they're embedded in declaration source text,
   -- not separate commands.
   let lines := output.splitOn "\n"
   let filtered := lines.filter fun line =>
     let t := line.trimAsciiStart.toString
-    !(t.startsWith "@[informal " || t.startsWith "@[expose]")
+    !(t.startsWith "@[informal ")
   output := "\n".intercalate filtered
   -- Trim trailing whitespace
   output := output.trimAsciiEnd.toString ++ "\n"

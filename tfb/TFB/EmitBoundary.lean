@@ -199,8 +199,16 @@ def emitBoundary (env : Environment) (roots : Array Name) (targetName : Name)
         if env.header.moduleNames[idx.toNat]! == modName then
           if let some ranges := findDeclRanges? env name then
             rangeMap := rangeMap.insert (fileMap.ofPosition ranges.range.pos) name
+    -- Every declaration in this module, so `processFile` can tell a declaration
+    -- command from a context command without guessing at syntax kinds.
+    let mut declPositions : Array String.Pos.Raw := #[]
+    for (n, _) in env.constants.toList do
+      if let some idx := env.getModuleIdxFor? n then
+        if env.header.moduleNames[idx.toNat]! == modName then
+          if let some ranges := findDeclRanges? env n then
+            declPositions := declPositions.push (fileMap.ofPosition ranges.range.pos)
     IO.eprintln s!"  {filePath} ({rangeMap.size} decls)"
-    let entries ← processFile source env rangeMap filePath.toString
+    let entries ← processFile source env rangeMap declPositions filePath.toString
     allModules := allModules.push { modName, entries := stripEmptySections entries }
 
   -- Mathlib wholesale, then every non-Mathlib external import by name.
