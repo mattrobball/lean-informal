@@ -3,6 +3,11 @@ version = "0.1.0"
 keywords = ["documentation", "formalization"]
 description = "Attribute for pairing formal Lean declarations with paper references"
 
+# Without this, bare `lake build` reports "no targets specified and no default
+# targets configured", builds nothing, and exits 0 -- a green build that
+# checked nothing.
+defaultTargets = ["Informal", "extract_decls"]
+
 # verso tags track Lean minor versions, so v4.32.0 is the tag for the whole
 # v4.32.x line -- there is no v4.32.1. Lake builds every dependency with the
 # ROOT toolchain (lean-toolchain here), so both of these compile under
@@ -27,7 +32,7 @@ rev = "verso-v4.32.0"
 [[require]]
 name = "stan"
 git = "https://github.com/mattrobball/lean-stan"
-rev = "main"
+rev = "v0.1.0"
 
 [[lean_lib]]
 name = "Informal"
