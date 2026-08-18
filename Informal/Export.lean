@@ -83,7 +83,10 @@ elab "#check_informal" : command => do
   if entries.isEmpty then
     logInfo "No informal entries to check."
     return
-  let mut issues := 0
+  -- Annotated deliberately: from Lean 4.32 the `m!"{issues}"` interpolations
+  -- below constrain this binding to `MessageData`, so a bare numeral fails to
+  -- elaborate. Pinning it to `Nat` settles all seven downstream errors.
+  let mut issues : Nat := 0
   for entry in entries do
     let some ci := env.find? entry.declName | do
       logWarning m!"@[informal \"{entry.paperRef}\"] on {.ofConstName entry.declName}: \

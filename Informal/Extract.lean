@@ -6,7 +6,7 @@ Authors: Matthew Ballard
 module
 
 public meta import Informal.Attr
-public meta import Informal.Classify
+public meta import Stan.Classify
 public meta import Lean.DocString
 
 /-!
@@ -32,7 +32,7 @@ This writes `extracted.json` at elaboration time.
 
 public meta section
 
-open Lean Elab Command Meta Informal
+open Lean Elab Command Meta Informal Stan
 
 /-- Classification of declaration kinds. -/
 inductive DeclKind where

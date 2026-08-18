@@ -9,8 +9,11 @@ Example:
   lake exe extract_decls BridgelandStability extracted.json
 -/
 import Informal
+-- `Informal` no longer re-exports the CLI bootstrap: it moved to the `tfb`
+-- package, which depends on Lean core alone.
+import Stan.Cli
 
-open Lean Informal.Cli
+open Lean Stan.Cli
 
 unsafe def main (args : List String) : IO Unit := do
   match args with
