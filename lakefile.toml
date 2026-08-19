@@ -8,21 +8,22 @@ description = "Attribute for pairing formal Lean declarations with paper referen
 # checked nothing.
 defaultTargets = ["Informal", "extract_decls"]
 
-# verso tags track Lean minor versions, so v4.32.0 is the tag for the whole
-# v4.32.x line -- there is no v4.32.1. Lake builds every dependency with the
-# ROOT toolchain (lean-toolchain here), so both of these compile under
-# v4.32.1 regardless of the toolchain files in their own tags.
+# verso tags track Lean minor versions: v4.33.0 is the tag for the whole
+# v4.33.x line. These must move with lean-toolchain above, not lag it --
+# a downstream shadow project that pulls verso v4.33.0 while getting
+# subverso verso-v4.32.0 transitively from here fails to build verso itself
+# ("The environment does not contain `Array.deIndent`").
 [[require]]
 name = "verso"
 git = "https://github.com/leanprover/verso"
-rev = "v4.32.0"
+rev = "v4.33.0"
 
 # Pinned rather than left on main: main currently pins v4.29.0-rc7, which is
 # what held this package back on 4.29.
 [[require]]
 name = "subverso"
 git = "https://github.com/leanprover/subverso"
-rev = "verso-v4.32.0"
+rev = "verso-v4.33.0"
 
 # The standalone-file emitter and the dependency/classification helpers this
 # package shares with it. Split out into its own repository because it needs
